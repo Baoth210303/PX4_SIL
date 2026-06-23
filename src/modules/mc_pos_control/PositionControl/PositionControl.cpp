@@ -113,8 +113,9 @@ bool PositionControl::update(const float dt)
 	bool valid = _inputValid();
 
 	if (valid) {
-		_positionControl();
-		_velocityControl(dt);
+		// Full SMC replacement of the PX4 P-position + PID-velocity cascade.
+		// All setpoint types pass through SMC; no fallback to the original cascade.
+		_smcPositionVelocityControl(dt);
 
 		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
 		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
@@ -122,6 +123,131 @@ bool PositionControl::update(const float dt)
 
 	// There has to be a valid output acceleration and thrust setpoint otherwise something went wrong
 	return valid && _acc_sp.isAllFinite() && _thr_sp.isAllFinite();
+}
+
+void PositionControl::_smcPositionVelocityControl(const float dt)
+{
+	(void)dt;
+
+	Vector3f pos_sp = _pos_sp;
+	Vector3f vel_sp = _vel_sp;
+	Vector3f acc_ff = _acc_sp;
+
+	// PX4 uses a very large downwards acceleration setpoint as an internal
+	// no-thrust request, e.g. during not-taken-off or flying-but-ground-contact.
+	// Preserve this PX4 convention instead of clipping it with the SMC acceleration limit.
+	const bool px4_no_thrust_request = PX4_ISFINITE(acc_ff(2)) && (acc_ff(2) > 2.f * CONSTANTS_ONE_G);
+
+	if (px4_no_thrust_request) {
+		_acc_sp = Vector3f(0.f, 0.f, CONSTANTS_ONE_G);
+		_thr_sp = Vector3f(0.f, 0.f, 0.f);
+		return;
+	}
+
+	// PX4 uses NED. During landing, z velocity setpoint is normally positive (Down).
+	// This is a temporary SITL landing handler for the full-SMC replacement path.
+	const bool smc_landing_descent = PX4_ISFINITE(_vel_sp(2)) && (_vel_sp(2) > 0.1f);
+	const bool smc_near_ground = PX4_ISFINITE(_pos(2)) && (_pos(2) > -_smc_landing_ground_threshold);
+
+	// Do not force zero thrust from raw landed/maybe_landed flags here.
+	// PX4 no-thrust requests are handled above by px4_no_thrust_request.
+	// Keeping only this local heuristic avoids blocking takeoff while still allowing SITL near-ground cut if needed.
+	const bool smc_force_zero_thrust = smc_landing_descent && smc_near_ground;
+
+	for (int i = 0; i <= 2; i++) {
+		const bool has_pos_sp = PX4_ISFINITE(_pos_sp(i));
+		const bool has_vel_sp = PX4_ISFINITE(_vel_sp(i));
+
+		if (!has_pos_sp) {
+			// No position command on this axis: remove the position-error term.
+			pos_sp(i) = PX4_ISFINITE(_pos(i)) ? _pos(i) : 0.f;
+		}
+
+		if (!has_vel_sp) {
+			// With a position command, desired velocity is zero if no feed-forward velocity is provided.
+			// Without a position command, remove the velocity-error term.
+			vel_sp(i) = has_pos_sp ? 0.f : (PX4_ISFINITE(_vel(i)) ? _vel(i) : 0.f);
+		}
+
+		if (!PX4_ISFINITE(acc_ff(i))) {
+			acc_ff(i) = 0.f;
+		}
+	}
+
+	// Basic SMC in PX4 NED frame:
+	// e     = x - xd
+	// e_dot = x_dot - xd_dot
+	// s     = e_dot + Lambda*e
+	const Vector3f e = _pos - pos_sp;
+	const Vector3f e_dot = _vel - vel_sp;
+	const Vector3f s = e_dot + e.emult(_smc_lambda);
+
+	Vector3f sat_s;
+
+	for (int i = 0; i <= 2; i++) {
+		sat_s(i) = _smcSat(s(i));
+	}
+
+	// u = xddot_d - Lambda*e_dot - K*s - eta*sat(s)
+	// In PX4 this virtual control is the inertial-frame acceleration setpoint _acc_sp.
+	Vector3f acc_cmd = acc_ff
+			   - e_dot.emult(_smc_lambda)
+			   - s.emult(_smc_k)
+			   - sat_s.emult(_smc_eta);
+
+	ControlMath::setZeroIfNanVector3f(acc_cmd);
+
+	// Temporary safety limits for the first offline/SITL test.
+	const float acc_xy_norm = acc_cmd.xy().norm();
+
+	if (acc_xy_norm > _smc_acc_xy_max && acc_xy_norm > FLT_EPSILON) {
+		acc_cmd.xy() = acc_cmd.xy() / acc_xy_norm * _smc_acc_xy_max;
+	}
+
+	acc_cmd(2) = math::constrain(acc_cmd(2), -_smc_acc_z_max, _smc_acc_z_max);
+
+	// Near the ground while descending, force the vertical acceleration command toward
+	// low thrust and remove horizontal acceleration demand. This helps the PX4 land
+	// detector satisfy the low-throttle condition without falling back to PID.
+	if (smc_force_zero_thrust) {
+		acc_cmd(0) = 0.f;
+		acc_cmd(1) = 0.f;
+		acc_cmd(2) = CONSTANTS_ONE_G;
+	}
+
+	_acc_sp = acc_cmd;
+
+	_accelerationControl();
+
+	// Once close to the ground during a commanded descent, stop asking for thrust.
+	// This is intentionally only a near-ground landing behavior; in normal flight SMC
+	// still uses the thrust generated from _acc_sp by _accelerationControl().
+	if (smc_force_zero_thrust) {
+		_thr_sp = Vector3f(0.f, 0.f, 0.f);
+		return;
+	}
+
+	// Keep the same thrust saturation strategy as the PX4 velocity controller,
+	// but without PID integral anti-windup because this basic SMC has no integral state.
+	const Vector2f thrust_sp_xy(_thr_sp);
+	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
+	const float thrust_max_squared = math::sq(_lim_thr_max);
+
+	const float allocated_horizontal_thrust = math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
+	const float thrust_z_max_squared = thrust_max_squared - math::sq(allocated_horizontal_thrust);
+
+	_thr_sp(2) = math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
+
+	const float thrust_max_xy_squared = thrust_max_squared - math::sq(_thr_sp(2));
+	float thrust_max_xy = 0.f;
+
+	if (thrust_max_xy_squared > 0.f) {
+		thrust_max_xy = sqrtf(thrust_max_xy_squared);
+	}
+
+	if (thrust_sp_xy_norm > thrust_max_xy && thrust_sp_xy_norm > FLT_EPSILON) {
+		_thr_sp.xy() = thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
+	}
 }
 
 void PositionControl::_positionControl()

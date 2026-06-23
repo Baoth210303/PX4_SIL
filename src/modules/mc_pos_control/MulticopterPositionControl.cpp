@@ -547,6 +547,14 @@ void MulticopterPositionControl::Run()
 
 			_control.setInputSetpoint(_setpoint);
 
+			_control.setLandDetectorState(
+				_vehicle_land_detected.ground_contact,
+				_vehicle_land_detected.maybe_landed,
+				_vehicle_land_detected.landed,
+				_vehicle_land_detected.in_descend,
+				_vehicle_land_detected.has_low_throttle
+			);
+
 			// update states
 			if (!PX4_ISFINITE(_setpoint.position[2])
 			    && PX4_ISFINITE(_setpoint.velocity[2]) && (fabsf(_setpoint.velocity[2]) > FLT_EPSILON)

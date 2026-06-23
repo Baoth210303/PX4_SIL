@@ -146,6 +146,19 @@ public:
 	 */
 	void setInputSetpoint(const trajectory_setpoint_s &setpoint);
 
+	void setLandDetectorState(const bool ground_contact,
+				  const bool maybe_landed,
+				  const bool landed,
+				  const bool in_descend,
+				  const bool has_low_throttle)
+	{
+		_ground_contact = ground_contact;
+		_maybe_landed = maybe_landed;
+		_landed = landed;
+		_in_descend = in_descend;
+		_has_low_throttle = has_low_throttle;
+	}
+
 	/**
 	 * Apply P-position and PID-velocity controller that updates the member
 	 * thrust, yaw- and yawspeed-setpoints.
@@ -200,12 +213,35 @@ private:
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
 	void _accelerationControl(); ///< Acceleration setpoint processing
+	void _smcPositionVelocityControl(const float dt); ///< Basic SMC position/velocity control
+
+	static float _smcSat(const float x)
+	{
+		return math::constrain(x, -1.f, 1.f);
+	}
 
 	// Gains
 	matrix::Vector3f _gain_pos_p; ///< Position control proportional gain
 	matrix::Vector3f _gain_vel_p; ///< Velocity control proportional gain
 	matrix::Vector3f _gain_vel_i; ///< Velocity control integral gain
 	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
+
+	// Basic SMC gains for offline/SITL verification. PX4 uses NED: z is positive down.
+	matrix::Vector3f _smc_lambda{1.f, 1.f, 1.f};
+	matrix::Vector3f _smc_k{1.f, 1.f, 1.f};
+	matrix::Vector3f _smc_eta{0.5f, 0.5f, 0.5f};
+
+	// Temporary SMC limits for safe offline/SITL verification.
+	float _smc_acc_xy_max{3.f}; ///< Horizontal acceleration limit [m/s^2]
+	float _smc_acc_z_max{3.f}; ///< Vertical acceleration limit [m/s^2]
+	float _smc_landing_ground_threshold{0.15f}; ///< Near-ground threshold for landing handling [m]
+
+	// Land detector state passed from MulticopterPositionControl
+	bool _ground_contact{false};
+	bool _maybe_landed{false};
+	bool _landed{false};
+	bool _in_descend{false};
+	bool _has_low_throttle{false};
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control
