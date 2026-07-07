@@ -132,23 +132,9 @@ MulticopterAttSmcControl::Run()
 			(_vehicle_status.vehicle_type == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING);
 
 		if (!run_smc_att_ctrl || !_attitude_valid || !_attitude_sp_valid) {
-		static hrt_abstime last_debug{0};
-
-		if (hrt_elapsed_time(&last_debug) > 1000000) {
-			last_debug = hrt_absolute_time();
-
-			PX4_INFO("SMC blocked: run=%d att=%d sp=%d att_flag=%d rate_flag=%d type=%d",
-			 	(int)run_smc_att_ctrl,
-			 	(int)_attitude_valid,
-			 	(int)_attitude_sp_valid,
-			 	(int)_vehicle_control_mode.flag_control_attitude_enabled,
-			 	(int)_vehicle_control_mode.flag_control_rates_enabled,
-			 	(int)_vehicle_status.vehicle_type);
-		}
-
-		_error_derivative_initialized = false;
-		perf_end(_loop_perf);
-		return;
+			_error_derivative_initialized = false;
+			perf_end(_loop_perf);
+			return;
 		}
 
 		// Quaternion attitude error:

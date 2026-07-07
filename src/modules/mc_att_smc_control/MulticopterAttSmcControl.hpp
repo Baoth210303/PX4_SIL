@@ -91,18 +91,18 @@ private:
 	matrix::Vector3f _e_q_dot_filt{};
 
 	// Initial SMC gains for SITL verification.
-	matrix::Vector3f _smc_lambda{4.0f, 4.0f, 2.5f};
-	matrix::Vector3f _smc_k{0.08f, 0.08f, 0.04f};
-	matrix::Vector3f _smc_eta{0.015f, 0.015f, 0.010f};
-	matrix::Vector3f _smc_boundary{0.15f, 0.15f, 0.10f};
+	matrix::Vector3f _smc_lambda{1.5f, 1.5f, 1.0f};
+	matrix::Vector3f _smc_k{0.008f, 0.008f, 0.004f};
+	matrix::Vector3f _smc_eta{0.0015f, 0.0015f, 0.0010f};
+	matrix::Vector3f _smc_boundary{0.40f, 0.40f, 0.30f};
 
 	// Approximate inertia from the MATLAB/SITL model [kg.m^2].
 	matrix::Vector3f _inertia{4.856e-3f, 4.856e-3f, 8.801e-3f};
 
 	// Torque normalization values [Nm].
-	matrix::Vector3f _torque_max{0.25f, 0.25f, 0.12f};
+	matrix::Vector3f _torque_max{0.40f, 0.40f, 0.20f};
 
-	float _e_dot_lpf_cutoff{20.f};
+	float _e_dot_lpf_cutoff{5.f};
 
 	float _energy_integration_time{0.0f};
 	float _control_energy[4]{};
