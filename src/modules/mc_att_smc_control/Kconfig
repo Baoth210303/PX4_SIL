@@ -1,0 +1,12 @@
+menuconfig MODULES_MC_ATT_SMC_CONTROL
+	bool "mc_att_smc_control"
+	default n
+	---help---
+		Enable support for mc_att_smc_control
+
+menuconfig USER_MC_ATT_SMC_CONTROL
+	bool "mc_att_smc_control running as userspace module"
+	default n
+	depends on BOARD_PROTECTED && MODULES_MC_ATT_SMC_CONTROL
+	---help---
+		Put mc_att_smc_control in userspace memory
