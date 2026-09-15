@@ -227,13 +227,13 @@ private:
 	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
 
 	// Basic SMC gains for offline/SITL verification. PX4 uses NED: z is positive down.
-	matrix::Vector3f _smc_lambda{1.5f, 1.5f, 1.2f};
+	matrix::Vector3f _smc_lambda{1.8f, 1.8f, 1.5f};
 	matrix::Vector3f _smc_k{1.5f, 1.5f, 1.2f};
 	matrix::Vector3f _smc_eta{0.8f, 0.8f, 0.6f};
 
 	// Temporary SMC limits for safe offline/SITL verification.
 	float _smc_acc_xy_max{8.f}; ///< Horizontal acceleration limit [m/s^2]
-	float _smc_acc_z_max{10.f}; ///< Vertical acceleration limit [m/s^2]
+	float _smc_acc_z_max{15.f}; ///< Vertical acceleration limit [m/s^2]
 	float _smc_landing_ground_threshold{0.15f}; ///< Near-ground threshold for landing handling [m]
 
 	// Land detector state passed from MulticopterPositionControl

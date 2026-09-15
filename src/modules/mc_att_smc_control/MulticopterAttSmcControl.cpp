@@ -133,6 +133,7 @@ MulticopterAttSmcControl::Run()
 
 		if (!run_smc_att_ctrl || !_attitude_valid || !_attitude_sp_valid) {
 			_error_derivative_initialized = false;
+			_omega_d_derivative_initialized = false;
 			perf_end(_loop_perf);
 			return;
 		}
@@ -165,18 +166,33 @@ MulticopterAttSmcControl::Run()
 			omega_d = _q.inversed().dcm_z() * _yaw_sp_move_rate;
 		}
 
+		Vector3f omega_dot_d{};
+
+		if (_omega_d_derivative_initialized) {
+			omega_dot_d = (omega_d - _omega_d_prev) / dt;
+
+		} else {
+			omega_dot_d.zero();
+			_omega_d_dot_filt.zero();
+			_omega_d_derivative_initialized = true;
+		}
+
+		const float alpha_omega_d = expf(-6.28318530718f * _omega_d_dot_lpf_cutoff * dt);
+		_omega_d_dot_filt = alpha_omega_d * _omega_d_dot_filt + (1.f - alpha_omega_d) * omega_dot_d;
+		_omega_d_prev = omega_d;
+
 		// Sliding surface:
 		// s = omega - omega_d - Lambda * e_q
 		const Vector3f s = omega - omega_d - _smc_lambda.emult(e_q);
 		const Vector3f sat_s = saturation(s);
 
 		// Newton-Euler body torque:
-		// tau = I*(Lambda*e_q_dot) + omega x (I*omega) - K*s - eta*sat(s)
+		// tau = I*(omega_dot_d + Lambda*e_q_dot) + omega x (I*omega) - K*s - eta*sat(s)
 		const Vector3f Iomega = _inertia.emult(omega);
 		const Vector3f omega_cross_Iomega = omega % Iomega;
 
 		const Vector3f tau_phys =
-			_inertia.emult(_smc_lambda.emult(_e_q_dot_filt))
+			_inertia.emult(_omega_d_dot_filt + _smc_lambda.emult(_e_q_dot_filt))
 			+ omega_cross_Iomega
 			- _smc_k.emult(s)
 			- _smc_eta.emult(sat_s);

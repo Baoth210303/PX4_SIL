@@ -89,20 +89,24 @@ private:
 
 	matrix::Vector3f _e_q_prev{};
 	matrix::Vector3f _e_q_dot_filt{};
+	matrix::Vector3f _omega_d_prev{};
+	matrix::Vector3f _omega_d_dot_filt{};
+	bool _omega_d_derivative_initialized{false};
 
 	// Initial SMC gains for SITL verification.
-	matrix::Vector3f _smc_lambda{1.5f, 1.5f, 1.0f};
-	matrix::Vector3f _smc_k{0.008f, 0.008f, 0.004f};
-	matrix::Vector3f _smc_eta{0.0015f, 0.0015f, 0.0010f};
+	matrix::Vector3f _smc_lambda{2.0f, 2.4f, 1.3f};
+	matrix::Vector3f _smc_k{0.016f, 0.028f, 0.007f};
+	matrix::Vector3f _smc_eta{0.0025f, 0.0040f, 0.0014f};
 	matrix::Vector3f _smc_boundary{0.40f, 0.40f, 0.30f};
 
-	// Approximate inertia from the MATLAB/SITL model [kg.m^2].
-	matrix::Vector3f _inertia{4.856e-3f, 4.856e-3f, 8.801e-3f};
+	// Approximate composite inertia from the Gazebo X500 model [kg.m^2].
+	matrix::Vector3f _inertia{0.02385f, 0.02395f, 0.04400f};
 
 	// Torque normalization values [Nm].
 	matrix::Vector3f _torque_max{0.40f, 0.40f, 0.20f};
 
 	float _e_dot_lpf_cutoff{5.f};
+	float _omega_d_dot_lpf_cutoff{5.f};
 
 	float _energy_integration_time{0.0f};
 	float _control_energy[4]{};
