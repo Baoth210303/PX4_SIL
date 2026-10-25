@@ -1,0 +1,20 @@
+--- src/modules/mc_pos_control/PositionControl/PositionControl.cpp
++++ src/modules/mc_pos_control/PositionControl/PositionControl.cpp
+@@ -149,13 +149,10 @@
+ 	const bool smc_landing_descent = PX4_ISFINITE(_vel_sp(2)) && (_vel_sp(2) > 0.1f);
+ 	const bool smc_near_ground = PX4_ISFINITE(_pos(2)) && (_pos(2) > -_smc_landing_ground_threshold);
+ 
+-	// Prefer the real PX4 land detector state when it is available from MulticopterPositionControl.
+-	const bool smc_land_detector_contact = _ground_contact && _in_descend && _has_low_throttle;
+-
+-	const bool smc_force_zero_thrust = smc_land_detector_contact
+-					   || _maybe_landed
+-					   || _landed
+-					   || (smc_landing_descent && smc_near_ground);
++	// Do not force zero thrust from raw landed/maybe_landed flags here.
++	// PX4 no-thrust requests are handled above by px4_no_thrust_request.
++	// Keeping only this local heuristic avoids blocking takeoff while still allowing SITL near-ground cut if needed.
++	const bool smc_force_zero_thrust = smc_landing_descent && smc_near_ground;
+ 
+ 	for (int i = 0; i <= 2; i++) {
+ 		const bool has_pos_sp = PX4_ISFINITE(_pos_sp(i));

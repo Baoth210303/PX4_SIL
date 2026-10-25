@@ -134,8 +134,46 @@ MulticopterAttSmcControl::Run()
 		if (!run_smc_att_ctrl || !_attitude_valid || !_attitude_sp_valid) {
 			_error_derivative_initialized = false;
 			_omega_d_derivative_initialized = false;
+
+			// Reset angular acceleration / TDE states
+			_omega_dot_initialized = false;
+			_tde_initialized = false;
+
+			_omega_prev.zero();
+			_omega_dot_filt.zero();
+			_omega_dot_prev.zero();
+			_tau_prev.zero();
+			_delta_hat.zero();
+			_delta_hat_filt.zero();
+
 			perf_end(_loop_perf);
 			return;
+		}
+
+		// =========================================================
+		// Actual angular acceleration estimation
+		// omega_dot(k) = [omega(k) - omega(k-1)] / dt
+		// =========================================================
+		Vector3f omega_dot{};
+
+		if (_omega_dot_initialized) {
+			omega_dot = (omega - _omega_prev) / dt;
+
+			// Low-pass filter to reduce gyro derivative noise
+			const float alpha_omega_dot =
+				expf(-6.28318530718f * _omega_dot_lpf_cutoff * dt);
+
+			_omega_dot_filt =
+				alpha_omega_dot * _omega_dot_filt
+				+ (1.f - alpha_omega_dot) * omega_dot;
+
+		} else {
+			omega_dot.zero();
+			_omega_dot_filt.zero();
+
+			// Store first valid angular velocity sample
+			_omega_prev = omega;
+			_omega_dot_initialized = true;
 		}
 
 		// Quaternion attitude error:
@@ -181,6 +219,53 @@ MulticopterAttSmcControl::Run()
 		_omega_d_dot_filt = alpha_omega_d * _omega_d_dot_filt + (1.f - alpha_omega_d) * omega_dot_d;
 		_omega_d_prev = omega_d;
 
+		// =========================================================
+		// Time-Delay Estimation (TDE)
+		// Delta_hat(k) = tau(k-1)
+		//              - (I0 + I_bar) * omega_dot(k-1)
+		//              - omega(k-1) x [I0 * omega(k-1)]
+		// =========================================================
+		if (_tde_initialized) {
+
+			const Vector3f I0_omega_prev = _inertia.emult(_omega_prev);
+			const Vector3f omega_cross_I0omega_prev =
+				_omega_prev % I0_omega_prev;
+
+			const Vector3f I_tde = _inertia + _tde_i_bar;
+
+			_delta_hat =
+				_tau_prev
+				- I_tde.emult(_omega_dot_prev)
+				- omega_cross_I0omega_prev;
+
+			// Numerical safety
+			for (int i = 0; i < 3; i++) {
+				if (!PX4_ISFINITE(_delta_hat(i))) {
+					_delta_hat(i) = 0.f;
+				}
+			}
+
+			// Low-pass filter for TDE estimate
+				const float alpha_delta_hat =
+					expf(-6.28318530718f * _delta_hat_lpf_cutoff * dt);
+
+				_delta_hat_filt =
+					alpha_delta_hat * _delta_hat_filt
+					+ (1.f - alpha_delta_hat) * _delta_hat;
+
+				// Limit TDE estimate during initial commissioning
+				for (int i = 0; i < 3; i++) {
+						_delta_hat_filt(i) = math::constrain(
+						_delta_hat_filt(i),
+						-_delta_hat_max(i),
+		 				_delta_hat_max(i));
+				}
+
+		} else {
+			_delta_hat.zero();
+			_delta_hat_filt.zero();
+		}
+
 		// Sliding surface:
 		// s = omega - omega_d - Lambda * e_q
 		const Vector3f s = omega - omega_d - _smc_lambda.emult(e_q);
@@ -191,11 +276,14 @@ MulticopterAttSmcControl::Run()
 		const Vector3f Iomega = _inertia.emult(omega);
 		const Vector3f omega_cross_Iomega = omega % Iomega;
 
+		const Vector3f I_control = _inertia + _tde_i_bar;
+
 		const Vector3f tau_phys =
-			_inertia.emult(_omega_d_dot_filt + _smc_lambda.emult(_e_q_dot_filt))
+			I_control.emult(_omega_d_dot_filt + _smc_lambda.emult(_e_q_dot_filt))
 			+ omega_cross_Iomega
 			- _smc_k.emult(s)
-			- _smc_eta.emult(sat_s);
+			- _smc_eta.emult(sat_s)
+			+ _tde_feedback_gain * _delta_hat_filt;
 
 		Vector3f torque_setpoint{};
 
@@ -204,6 +292,13 @@ MulticopterAttSmcControl::Run()
 
 			torque_setpoint(i) = PX4_ISFINITE(tau_phys(i)) ?
 					     math::constrain(tau_phys(i) / tau_max, -1.f, 1.f) : 0.f;
+		}
+
+		// Physical torque actually commanded after normalization/saturation [Nm]
+		Vector3f tau_applied{};
+
+		for (int i = 0; i < 3; i++) {
+			tau_applied(i) = torque_setpoint(i) * _torque_max(i);
 		}
 
 		vehicle_thrust_setpoint_s vehicle_thrust_setpoint{};
@@ -226,6 +321,12 @@ MulticopterAttSmcControl::Run()
 		_vehicle_torque_setpoint_pub.publish(vehicle_torque_setpoint);
 
 		updateActuatorControlsStatus(vehicle_torque_setpoint, dt);
+
+		// Store delayed data for next control cycle
+		_omega_prev = omega;
+		_omega_dot_prev = _omega_dot_filt;
+		_tau_prev = tau_applied;
+		_tde_initialized = true;
 	}
 
 	perf_end(_loop_perf);

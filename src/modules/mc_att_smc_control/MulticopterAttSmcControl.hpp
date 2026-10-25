@@ -93,6 +93,51 @@ private:
 	matrix::Vector3f _omega_d_dot_filt{};
 	bool _omega_d_derivative_initialized{false};
 
+	// ================= TDE =================
+
+	// Actual angular velocity history
+	matrix::Vector3f _omega_prev{};
+
+	// Estimated angular acceleration	
+	matrix::Vector3f _omega_dot_filt{};
+	matrix::Vector3f _omega_dot_prev{};
+
+	// Previous applied physical torque [Nm]
+	matrix::Vector3f _tau_prev{};
+
+	// Estimated lumped uncertainty [Nm]
+	matrix::Vector3f _delta_hat{};
+
+	// Filtered TDE estimate [Nm]
+	matrix::Vector3f _delta_hat_filt{};
+
+	// TDE estimate limits for initial commissioning [Nm]
+	matrix::Vector3f _delta_hat_max{
+		0.05f,
+		0.05f,
+		0.03f
+	};
+
+	// TDE feedback gain for initial closed-loop commissioning
+	float _tde_feedback_gain{0.25f};
+
+	// LPF cutoff for TDE estimate
+	float _delta_hat_lpf_cutoff{5.f};
+
+	// TDE initialization flag
+	bool _omega_dot_initialized{false};
+	bool _tde_initialized{false};
+
+	// Positive diagonal TDE gain matrix I_bar
+	matrix::Vector3f _tde_i_bar{
+		0.00477f,
+		0.00479f,
+		0.00880f
+	};
+
+	// LPF cutoff for angular acceleration estimation
+	float _omega_dot_lpf_cutoff{10.f};
+
 	// Initial SMC gains for SITL verification.
 	matrix::Vector3f _smc_lambda{2.0f, 2.4f, 1.3f};
 	matrix::Vector3f _smc_k{0.016f, 0.028f, 0.007f};
