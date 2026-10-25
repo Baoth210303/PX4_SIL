@@ -1,7 +1,6 @@
 /****************************************************************************
  *
- *   Quaternion Sliding Mode Attitude Controller (QSMC)
- *   for PX4 multicopter attitude control.
+ *   Multicopter attitude SMC controller for PX4 SITL verification.
  *
  ****************************************************************************/
 
@@ -33,6 +32,7 @@
 
 using namespace time_literals;
 
+
 class MulticopterAttSmcControl :
 	public ModuleBase<MulticopterAttSmcControl>,
 	public ModuleParams,
@@ -52,11 +52,8 @@ public:
 
 	bool init();
 
-private:
 
-	// =========================================================
-	// Main controller loop
-	// =========================================================
+private:
 
 	void Run() override;
 
@@ -65,6 +62,9 @@ private:
 	void updateActuatorControlsStatus(
 		const vehicle_torque_setpoint_s &vehicle_torque_setpoint,
 		float dt);
+
+	matrix::Vector3f saturation(
+		const matrix::Vector3f &s) const;
 
 
 	// =========================================================
@@ -120,7 +120,7 @@ private:
 
 
 	// =========================================================
-	// PX4 vehicle states
+	// PX4 states
 	// =========================================================
 
 	vehicle_control_mode_s _vehicle_control_mode{};
@@ -135,6 +135,8 @@ private:
 
 	bool _attitude_sp_valid{false};
 
+	bool _error_derivative_initialized{false};
+
 
 	// =========================================================
 	// Timing
@@ -146,10 +148,13 @@ private:
 
 
 	// =========================================================
-	// Actual and desired attitude quaternions
+	// Quaternion states
 	//
-	// q   : actual attitude quaternion
-	// q_d : desired attitude quaternion
+	// q:
+	// actual attitude from vehicle_attitude / EKF
+	//
+	// q_d:
+	// desired attitude from vehicle_attitude_setpoint
 	// =========================================================
 
 	matrix::Quatf _q{
@@ -168,101 +173,62 @@ private:
 
 
 	// =========================================================
-	// Desired attitude kinematics
-	//
-	// The PX4 attitude setpoint provides q_d.
-	//
-	// omega_Rd:
-	// desired angular velocity expressed in the desired frame.
-	//
-	// alpha_Rd:
-	// desired angular acceleration expressed in the desired frame.
-	//
-	// These quantities are estimated from successive q_d samples.
-	// =========================================================
-
-	matrix::Quatf _q_d_prev{
-		1.f,
-		0.f,
-		0.f,
-		0.f
-	};
-
-	hrt_abstime _q_d_prev_timestamp{0};
-
-	matrix::Vector3f _omega_Rd{};
-
-	matrix::Vector3f _alpha_Rd_filt{};
-
-	bool _desired_kinematics_initialized{false};
-
-
-	// =========================================================
-	// Thrust setpoint
-	//
-	// QSMC controls attitude torque only.
-	// The thrust command is passed through from
-	// vehicle_attitude_setpoint.
+	// PX4 attitude setpoint
 	// =========================================================
 
 	matrix::Vector3f _thrust_setpoint{};
 
+	float _yaw_sp_move_rate{0.f};
+
 
 	// =========================================================
-	// QSMC gains
+	// Quaternion error derivative
 	//
-	// Sliding surface:
-	//
-	// s_q =
-	// omega_e
-	// + Lambda_q * sgn_+(q_we) * q_e_vec
-	//
-	// Control law:
-	//
-	// tau =
-	// J_hat * omega_dot_d
-	// + omega x (J_hat * omega)
-	// - J_hat * Lambda_q * sgn_+(q_we) * q_e_vec_dot
-	// - J_hat * K_q * tanh(s_q / phi_q)
-	//
+	// Keep old numerical derivative + LPF structure.
 	// =========================================================
 
+	matrix::Vector3f _e_q_prev{};
 
-	// Lambda_q
+	matrix::Vector3f _e_q_dot_filt{};
+
+
+	// =========================================================
+	// Desired angular velocity
 	//
-	// Sliding surface convergence gain
+	// Keep old PX4 implementation.
+	// =========================================================
+
+	matrix::Vector3f _omega_d_prev{};
+
+	matrix::Vector3f _omega_d_dot_filt{};
+
+	bool _omega_d_derivative_initialized{false};
+
+
+	// =========================================================
+	// SMC gains
 	//
+	// Keep exactly the old stable gains.
+	// =========================================================
+
 	matrix::Vector3f _smc_lambda{
 		2.0f,
 		2.4f,
 		1.3f
 	};
 
-
-	// K_q
-	//
-	// QSMC switching / robust gain
-	//
-	// NOTE:
-	// These are initial commissioning values only.
-	// They will be retuned for the X500.
-	//
 	matrix::Vector3f _smc_k{
 		0.016f,
 		0.028f,
 		0.007f
 	};
 
+	matrix::Vector3f _smc_eta{
+		0.0025f,
+		0.0040f,
+		0.0014f
+	};
 
-	// phi_q
-	//
-	// Boundary-layer parameters used in:
-	//
-	// tanh(s_q / phi_q)
-	//
-	// The variable name "_smc_boundary" is temporarily retained
-	// to minimize unnecessary code changes.
-	//
 	matrix::Vector3f _smc_boundary{
 		0.40f,
 		0.40f,
@@ -271,25 +237,30 @@ private:
 
 
 	// =========================================================
-	// Nominal inertia matrix
+	// X500 composite inertia
 	//
-	// J_hat = diag(Jx, Jy, Jz)
+	// Calculated from x500_base.sdf:
 	//
-	// Approximate composite inertia of Gazebo X500 [kg.m^2]
+	// base_link + 4 rotors
+	//
+	// expressed about the complete vehicle CoM.
+	//
+	// [kg.m^2]
 	// =========================================================
 
 	matrix::Vector3f _inertia{
-		0.02385f,
-		0.02395f,
-		0.04400f
+		0.02383948f,
+		0.02394241f,
+		0.04399995f
 	};
 
 
 	// =========================================================
 	// Torque normalization
 	//
-	// Physical torque [Nm] is converted to the normalized
-	// PX4 vehicle_torque_setpoint range [-1, 1].
+	// Keep old values.
+	//
+	// [Nm]
 	// =========================================================
 
 	matrix::Vector3f _torque_max{
@@ -300,8 +271,10 @@ private:
 
 
 	// =========================================================
-	// Desired angular acceleration LPF
+	// Filters
 	// =========================================================
+
+	float _e_dot_lpf_cutoff{5.f};
 
 	float _omega_d_dot_lpf_cutoff{5.f};
 
