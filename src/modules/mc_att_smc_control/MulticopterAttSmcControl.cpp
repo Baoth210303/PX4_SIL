@@ -1,35 +1,38 @@
 /****************************************************************************
  *
- *   Multicopter quaternion SMC controller.
+ *   Quaternion PD attitude controller.
  *
- *   Desired attitude trajectory:
+ *   QPD attitude law:
  *
- *   Position SMC
+ *       q_e =
+ *           q_d^{-1} otimes q
  *
- *        |
- *        v
+ *       sigma =
+ *           +1, q_e,w >= 0
+ *           -1, q_e,w < 0
  *
- *   R_d, omega_Rd, alpha_Rd
+ *       omega_d = 0
  *
- *        |
- *        v
+ *       omega_e =
+ *           omega - omega_d
  *
- *   smc_attitude_reference
+ *       tau =
+ *           - KD_phys * omega_e
+ *           - KP_phys * (
+ *                 sigma * q_e_vec
+ *             )
  *
- *        |
- *        v
+ *   where:
  *
- *   mc_att_smc_control
+ *       KD_phys =
+ *           J * KD_q
  *
- *        |
- *        v
+ *       KP_phys =
+ *           J * KP_q
  *
- *   omega_d, omega_dot_d
- *
- *        |
- *        v
- *
- *   QSMC torque
+ *   This follows the public quaternion-PD implementation while
+ *   retaining the PX4/X500 outer-loop Position SMC and q_d
+ *   reference generation developed on the QSMC branch.
  *
  ****************************************************************************/
 
@@ -125,46 +128,11 @@ MulticopterAttSmcControl::
 parameters_updated()
 {
 	/**
-	 * Fixed internal gains for initial
-	 * SITL/HIL verification.
+	 * Fixed internal QPD gains for the initial
+	 * SITL comparison.
+	 *
+	 * No runtime PX4 parameters are introduced yet.
 	 */
-}
-
-
-Vector3f
-MulticopterAttSmcControl::saturation(
-	const Vector3f &s) const
-{
-	Vector3f sat_s{};
-
-
-	for (int i = 0;
-	     i < 3;
-	     i++) {
-
-		const float boundary =
-
-			fmaxf(
-
-				_smc_boundary(i),
-
-				FLT_EPSILON);
-
-
-		sat_s(i) =
-
-			math::constrain(
-
-				s(i)
-				/ boundary,
-
-				-1.f,
-
-				1.f);
-	}
-
-
-	return sat_s;
 }
 
 
@@ -323,9 +291,18 @@ MulticopterAttSmcControl::Run()
 
 
 		// =====================================================
-		// Desired analytical attitude trajectory
+		// Desired attitude reference
 		//
-		// Produced at Position SMC update rate.
+		// Position SMC remains exactly the same as on the
+		// verified QSMC branch.
+		//
+		// QPD only uses:
+		//
+		//     q_d
+		//     thrust_body
+		//
+		// omega_Rd and alpha_Rd are intentionally NOT used
+		// by this baseline QPD controller.
 		// =====================================================
 
 		if (_smc_attitude_reference_sub
@@ -345,50 +322,10 @@ MulticopterAttSmcControl::Run()
 						ref.q_d);
 
 
-				_omega_Rd =
-
-					Vector3f(
-						ref.omega_rd);
-
-
-				_alpha_Rd =
-
-					Vector3f(
-						ref.alpha_rd);
-
-
 				_thrust_setpoint =
 
 					Vector3f(
 						ref.thrust_body);
-
-
-				_reference_analytic_valid =
-
-					ref.analytic_valid;
-
-
-				_reference_saturated =
-
-					ref.saturated;
-
-
-				/**
-				 * If a hard PX4 safety limiter
-				 * invalidated the analytical
-				 * derivatives:
-				 *
-				 * continue q_d tracking
-				 *
-				 * but disable angular feed-forward.
-				 */
-				if (!_reference_analytic_valid
-				    || _reference_saturated) {
-
-					_omega_Rd.zero();
-
-					_alpha_Rd.zero();
-				}
 
 
 				_attitude_ref_valid =
@@ -396,10 +333,6 @@ MulticopterAttSmcControl::Run()
 					ref.valid
 
 					&& _q_d.isAllFinite()
-
-					&& _omega_Rd.isAllFinite()
-
-					&& _alpha_Rd.isAllFinite()
 
 					&& _thrust_setpoint
 					.isAllFinite();
@@ -434,7 +367,7 @@ MulticopterAttSmcControl::Run()
 		// Controller activation
 		// =====================================================
 
-		const bool run_smc_att_ctrl =
+		const bool run_qpd_att_ctrl =
 
 			_vehicle_control_mode
 			.flag_control_attitude_enabled
@@ -452,7 +385,7 @@ MulticopterAttSmcControl::Run()
 			 VEHICLE_TYPE_ROTARY_WING);
 
 
-		if (!run_smc_att_ctrl
+		if (!run_qpd_att_ctrl
 
 		    || !_attitude_valid
 
@@ -467,64 +400,9 @@ MulticopterAttSmcControl::Run()
 
 
 		// =========================================================
-		// Desired trajectory frame transformation
-		//
-		// Position layer gives:
-		//
-		// omega_Rd
-		// alpha_Rd
-		//
-		// in desired body frame B_d.
-		//
-		// Current gyro is in current body frame B.
-		//
-		// Therefore:
-		//
-		// Q = R^T R_d
-		//
-		// omega_d =
-		//
-		// Q omega_Rd
-		//
-		// omega_dot_d =
-		//
-		// Q alpha_Rd
-		//
-		// - omega x omega_d
-		// =========================================================
-
-		const Dcmf R{
-			_q
-		};
-
-
-		const Dcmf R_d{
-			_q_d
-		};
-
-
-		const Dcmf Q =
-
-			R.transpose()
-
-			* R_d;
-
-
-		const Vector3f omega_d =
-
-			Q
-			* _omega_Rd;
-
-
-		const Vector3f omega_dot_d =
-    		Q * _alpha_Rd
-    		- (omega % omega_d);
-
-
-		// =========================================================
 		// Quaternion attitude error
 		//
-		// Paper convention:
+		// Public-author convention:
 		//
 		// q_e =
 		//
@@ -539,10 +417,12 @@ MulticopterAttSmcControl::Run()
 
 
 		const float q_we =
+
 			q_e(0);
 
 
 		const Vector3f q_e_vec =
+
 			q_e.imag();
 
 
@@ -551,9 +431,9 @@ MulticopterAttSmcControl::Run()
 		//
 		// sigma =
 		//
-		// +1  if q_we >= 0
+		// +1, q_e,w >= 0
 		//
-		// -1  otherwise
+		// -1, q_e,w < 0
 		// =========================================================
 
 		const float sigma =
@@ -566,20 +446,22 @@ MulticopterAttSmcControl::Run()
 
 
 		// =========================================================
-		// Quaternion attitude-error vector
+		// Desired angular velocity
 		//
-		// e_q =
+		// IMPORTANT:
 		//
-		// 2 sigma q_e_vec
+		// The public QPD implementation calculates desired
+		// attitude trajectory derivatives upstream but then
+		// explicitly sets:
+		//
+		// omega_d = 0
+		//
+		// immediately before the quaternion-PD attitude law.
+		//
+		// We reproduce that implementation here.
 		// =========================================================
 
-		const Vector3f e_q =
-
-			2.f
-
-			* sigma
-
-			* q_e_vec;
+		const Vector3f omega_d{};
 
 
 		// =========================================================
@@ -588,6 +470,10 @@ MulticopterAttSmcControl::Run()
 		// omega_e =
 		//
 		// omega - omega_d
+		//
+		// Since omega_d = 0:
+		//
+		// omega_e = omega
 		// =========================================================
 
 		const Vector3f omega_e =
@@ -598,131 +484,92 @@ MulticopterAttSmcControl::Run()
 
 
 		// =========================================================
-		// Analytical quaternion error derivative
+		// Quaternion proportional feedback term
 		//
-		// Experimental implementation:
+		// IMPORTANT:
 		//
-		// q_e_dot =
-		// 0.5 q_e otimes [omega_e, 0]
+		// Public QPD implementation uses:
 		//
-		// For:
+		// sigma * q_e_vec
 		//
-		// e_q = 2 sigma q_e_vec
+		// NOT:
 		//
-		// therefore:
+		// 2 * sigma * q_e_vec
 		//
-		// e_q_dot =
-		//
-		// sigma *
-		// (
-		//   q_we * omega_e
-		//   + q_e_vec x omega_e
-		// )
-		//
-		// No numerical differentiation.
-		// No LPF.
+		// The latter is the e_q convention used by our QSMC.
 		// =========================================================
 
-		const Vector3f e_q_dot =
+		const Vector3f q_feedback =
 
 			sigma
 
-			* (q_we * omega_e
-
-			   + (q_e_vec % omega_e));
+			* q_e_vec;
 
 
 		// =========================================================
-		// Sliding surface
+		// Author-style inertia-scaled QPD gains
 		//
-		// q_e = q_d^{-1} q
+		// KD_phys_i =
 		//
-		// s =
+		// J_i * KD_i
 		//
-		// omega_e + Lambda e_q
+		// KP_phys_i =
+		//
+		// J_i * KP_i
 		// =========================================================
 
-		const Vector3f s =
-
-			omega_e
-
-			+ _smc_lambda.emult(
-				e_q);
-
-
-		const Vector3f sat_s =
-
-			saturation(
-				s);
-
-
-		// =========================================================
-		// Newton-Euler rigid-body term
-		// =========================================================
-
-		const Vector3f Iomega =
+		const Vector3f kd_phys =
 
 			_inertia.emult(
-				omega);
+				_qpd_kd);
 
 
-		const Vector3f omega_cross_Iomega =
+		const Vector3f kp_phys =
 
-			omega
-
-			% Iomega;
+			_inertia.emult(
+				_qpd_kp);
 
 
 		// =========================================================
-		// SMC torque law
-		//
-		// Since:
-		//
-		// s =
-		//
-		// omega
-		//
-		// - omega_d
-		//
-		// + Lambda e_q
-		//
-		//
-		// choose:
+		// Quaternion PD torque
 		//
 		// tau =
 		//
-		// J(
-		//   omega_dot_d
-		//   - Lambda e_q_dot
-		// )
+		// - KD_phys * omega_e
 		//
-		// + omega x J omega
+		// - KP_phys * (
+		//       sigma * q_e_vec
+		//   )
 		//
-		// - K s
+		// No:
 		//
-		// - eta sat(s)
+		// - sliding surface
+		// - robust switching term
+		// - omega_dot_d feed-forward
+		// - omega x J omega compensation
+		//
+		// This intentionally follows the public QPD baseline.
 		// =========================================================
 
-		const Vector3f tau_phys =
+		Vector3f tau_phys =
 
-			_inertia.emult(
+			kd_phys.emult(
+				omega_e)
 
-				omega_dot_d
+			+
 
-				- _smc_lambda.emult(
-					e_q_dot))
+			kp_phys.emult(
+				q_feedback);
 
-			+ omega_cross_Iomega
 
-			- _smc_k.emult(
-				s)
-
-			- _smc_eta.emult(
-				sat_s);
+		tau_phys *=
+			-1.f;
 
 
 		// =========================================================
 		// Physical torque -> PX4 normalized torque
+		//
+		// Same normalization as the QSMC branch.
 		// =========================================================
 
 		Vector3f torque_setpoint{};
@@ -1014,7 +861,21 @@ MulticopterAttSmcControl::print_usage(
 	PRINT_MODULE_DESCRIPTION(
 		R"DESCR_STR(
 ### Description
-Quaternion sliding mode attitude controller.
+Quaternion PD attitude controller.
+
+This branch reproduces the public quaternion-PD attitude law while
+retaining the same Position SMC and desired quaternion q_d generator
+used by the verified quaternion-SMC branch.
+
+Attitude law:
+
+q_e = q_d^{-1} otimes q
+
+omega_d = 0
+
+tau =
+    - KD * omega
+    - KP * sign(q_e,w) * q_e,vec
 
 Inputs:
 - vehicle_attitude
@@ -1027,8 +888,8 @@ Outputs:
 
 The controller directly replaces mc_att_control + mc_rate_control.
 
-Desired omega/alpha are generated analytically by the Position SMC
-and mapped into the current body frame at the angular-velocity callback rate.
+The executable/module name mc_att_smc_control is intentionally retained
+during the first QPD verification so that only the control law changes.
 )DESCR_STR");
 
 
