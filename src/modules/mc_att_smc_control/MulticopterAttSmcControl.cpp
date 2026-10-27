@@ -1,26 +1,35 @@
 /****************************************************************************
  *
- *   Multicopter attitude SMC controller for PX4 SITL verification.
+ *   Multicopter quaternion SMC controller.
  *
- *   Incremental quaternion correction:
+ *   Desired attitude trajectory:
  *
- *   Old:
+ *   Position SMC
  *
- *       q_error = q^{-1} * q_d
+ *        |
+ *        v
  *
- *       s = omega_e - Lambda * e_q
+ *   R_d, omega_Rd, alpha_Rd
  *
+ *        |
+ *        v
  *
- *   New:
+ *   smc_attitude_reference
  *
- *       q_e = q_d^{-1} * q
+ *        |
+ *        v
  *
- *       e_q = 2 * sgn_+(q_we) * q_e_vec
+ *   mc_att_smc_control
  *
- *       s = omega_e + Lambda * e_q
+ *        |
+ *        v
  *
+ *   omega_d, omega_dot_d
  *
- *   The rest of the old stable SMC/PX4 structure is preserved.
+ *        |
+ *        v
+ *
+ *   QSMC torque
  *
  ****************************************************************************/
 
@@ -33,57 +42,92 @@
 #include <mathlib/math/Functions.hpp>
 #include <mathlib/math/Limits.hpp>
 
+
 using namespace matrix;
 
 
-MulticopterAttSmcControl::MulticopterAttSmcControl(bool vtol) :
-	ModuleParams(nullptr),
-	WorkItem(MODULE_NAME, px4::wq_configurations::rate_ctrl),
+MulticopterAttSmcControl::MulticopterAttSmcControl(
+	bool vtol) :
+
+	ModuleParams(
+		nullptr),
+
+	WorkItem(
+		MODULE_NAME,
+		px4::wq_configurations::rate_ctrl),
+
 	_vehicle_thrust_setpoint_pub(
-		vtol ?
-		ORB_ID(vehicle_thrust_setpoint_virtual_mc) :
-		ORB_ID(vehicle_thrust_setpoint)),
+
+		vtol
+
+		? ORB_ID(
+			vehicle_thrust_setpoint_virtual_mc)
+
+		: ORB_ID(
+			vehicle_thrust_setpoint)),
+
 	_vehicle_torque_setpoint_pub(
-		vtol ?
-		ORB_ID(vehicle_torque_setpoint_virtual_mc) :
-		ORB_ID(vehicle_torque_setpoint)),
+
+		vtol
+
+		? ORB_ID(
+			vehicle_torque_setpoint_virtual_mc)
+
+		: ORB_ID(
+			vehicle_torque_setpoint)),
+
 	_loop_perf(
+
 		perf_alloc(
+
 			PC_ELAPSED,
-			MODULE_NAME": cycle"))
+
+			MODULE_NAME
+			": cycle"))
 {
 	_vehicle_status.vehicle_type =
-		vehicle_status_s::VEHICLE_TYPE_ROTARY_WING;
+
+		vehicle_status_s::
+		VEHICLE_TYPE_ROTARY_WING;
+
 
 	parameters_updated();
 }
 
 
-MulticopterAttSmcControl::~MulticopterAttSmcControl()
+MulticopterAttSmcControl::
+~MulticopterAttSmcControl()
 {
-	perf_free(_loop_perf);
+	perf_free(
+		_loop_perf);
 }
 
 
 bool
 MulticopterAttSmcControl::init()
 {
-	if (!_vehicle_angular_velocity_sub.registerCallback()) {
+	if (!_vehicle_angular_velocity_sub
+	    .registerCallback()) {
 
-		PX4_ERR("callback registration failed");
+		PX4_ERR(
+			"callback registration failed");
 
 		return false;
 	}
+
 
 	return true;
 }
 
 
 void
-MulticopterAttSmcControl::parameters_updated()
+MulticopterAttSmcControl::
+parameters_updated()
 {
-	// Fixed internal gains for SITL verification.
-	// Later these can be exposed as PX4 parameters.
+	/**
+	 * Fixed internal gains for initial
+	 * SITL/HIL verification.
+	 */
 }
 
 
@@ -93,19 +137,32 @@ MulticopterAttSmcControl::saturation(
 {
 	Vector3f sat_s{};
 
-	for (int i = 0; i < 3; i++) {
+
+	for (int i = 0;
+	     i < 3;
+	     i++) {
 
 		const float boundary =
+
 			fmaxf(
+
 				_smc_boundary(i),
+
 				FLT_EPSILON);
 
+
 		sat_s(i) =
+
 			math::constrain(
-				s(i) / boundary,
+
+				s(i)
+				/ boundary,
+
 				-1.f,
+
 				1.f);
 	}
+
 
 	return sat_s;
 }
@@ -116,15 +173,19 @@ MulticopterAttSmcControl::Run()
 {
 	if (should_exit()) {
 
-		_vehicle_angular_velocity_sub.unregisterCallback();
+		_vehicle_angular_velocity_sub
+		.unregisterCallback();
+
 
 		exit_and_cleanup();
+
 
 		return;
 	}
 
 
-	perf_begin(_loop_perf);
+	perf_begin(
+		_loop_perf);
 
 
 	// =========================================================
@@ -133,407 +194,452 @@ MulticopterAttSmcControl::Run()
 
 	if (_parameter_update_sub.updated()) {
 
-		parameter_update_s param_update{};
+		parameter_update_s
+		param_update{};
+
 
 		_parameter_update_sub.copy(
 			&param_update);
 
+
 		updateParams();
+
 
 		parameters_updated();
 	}
 
 
-	vehicle_angular_velocity_s angular_velocity{};
+	vehicle_angular_velocity_s
+	angular_velocity{};
 
+
+	// =========================================================
+	// Controller runs on every fresh angular-velocity sample
+	// =========================================================
 
 	if (_vehicle_angular_velocity_sub.update(
 		    &angular_velocity)) {
 
 
 		const hrt_abstime now =
-			angular_velocity.timestamp_sample;
+
+			angular_velocity
+			.timestamp_sample;
 
 
 		const float dt =
+
 			math::constrain(
-				((now - _last_run) * 1e-6f),
+
+				((now
+				  - _last_run)
+
+				 * 1e-6f),
+
 				0.000125f,
+
 				0.02f);
 
 
-		_last_run = now;
+		_last_run =
+			now;
 
 
 		// =====================================================
-		// Actual body angular velocity
-		//
-		// omega = [p q r]^T
+		// Current body angular velocity
 		// =====================================================
 
 		const Vector3f omega{
+
 			angular_velocity.xyz
 		};
 
 
 		// =====================================================
-		// PX4 vehicle states
+		// PX4 control state
 		// =====================================================
 
-		_vehicle_control_mode_sub.update(
+		_vehicle_control_mode_sub
+		.update(
 			&_vehicle_control_mode);
 
-		_vehicle_status_sub.update(
+
+		_vehicle_status_sub
+		.update(
 			&_vehicle_status);
 
 
-		if (_vehicle_land_detected_sub.updated()) {
+		if (_vehicle_land_detected_sub
+		    .updated()) {
 
 			vehicle_land_detected_s
 			vehicle_land_detected{};
 
-			if (_vehicle_land_detected_sub.copy(
+
+			if (_vehicle_land_detected_sub
+			    .copy(
 				    &vehicle_land_detected)) {
 
 				_landed =
-					vehicle_land_detected.landed;
+
+					vehicle_land_detected
+					.landed;
+
 
 				_maybe_landed =
-					vehicle_land_detected.maybe_landed;
+
+					vehicle_land_detected
+					.maybe_landed;
 			}
 		}
 
 
 		// =====================================================
-		// Actual attitude quaternion q
+		// Current attitude q
 		//
-		// Directly from EKF / vehicle_attitude.
-		//
-		// q is NOT calculated by this controller.
+		// EKF -> vehicle_attitude
 		// =====================================================
 
 		if (_vehicle_attitude_sub.updated()) {
 
-			vehicle_attitude_s vehicle_attitude{};
+			vehicle_attitude_s
+			vehicle_attitude{};
+
 
 			if (_vehicle_attitude_sub.copy(
 				    &vehicle_attitude)) {
 
 				_q =
+
 					Quatf(
 						vehicle_attitude.q);
 
-				_attitude_valid = true;
+
+				_attitude_valid =
+
+					_q.isAllFinite();
 			}
 		}
 
 
 		// =====================================================
-		// Desired attitude quaternion q_d
+		// Desired analytical attitude trajectory
 		//
-		// Directly from PX4 vehicle_attitude_setpoint.
-		//
-		// q_d is NOT reconstructed or differentiated.
+		// Produced at Position SMC update rate.
 		// =====================================================
 
-		if (_vehicle_attitude_setpoint_sub.updated()) {
+		if (_smc_attitude_reference_sub
+		    .updated()) {
 
-			vehicle_attitude_setpoint_s
-			vehicle_attitude_setpoint{};
+			smc_attitude_reference_s
+			ref{};
 
-			if (_vehicle_attitude_setpoint_sub.copy(
-				    &vehicle_attitude_setpoint)) {
+
+			if (_smc_attitude_reference_sub
+			    .copy(
+				    &ref)) {
 
 				_q_d =
+
 					Quatf(
-						vehicle_attitude_setpoint.q_d);
+						ref.q_d);
+
+
+				_omega_Rd =
+
+					Vector3f(
+						ref.omega_rd);
+
+
+				_alpha_Rd =
+
+					Vector3f(
+						ref.alpha_rd);
 
 
 				_thrust_setpoint =
+
 					Vector3f(
-						vehicle_attitude_setpoint.thrust_body);
+						ref.thrust_body);
 
 
-				_yaw_sp_move_rate =
+				_reference_analytic_valid =
 
-					PX4_ISFINITE(
-						vehicle_attitude_setpoint.yaw_sp_move_rate)
-
-					? vehicle_attitude_setpoint.yaw_sp_move_rate
-
-					: 0.f;
+					ref.analytic_valid;
 
 
-				_attitude_sp_valid = true;
+				_reference_saturated =
+
+					ref.saturated;
+
+
+				/**
+				 * If a hard PX4 safety limiter
+				 * invalidated the analytical
+				 * derivatives:
+				 *
+				 * continue q_d tracking
+				 *
+				 * but disable angular feed-forward.
+				 */
+				if (!_reference_analytic_valid
+				    || _reference_saturated) {
+
+					_omega_Rd.zero();
+
+					_alpha_Rd.zero();
+				}
+
+
+				_attitude_ref_valid =
+
+					ref.valid
+
+					&& _q_d.isAllFinite()
+
+					&& _omega_Rd.isAllFinite()
+
+					&& _alpha_Rd.isAllFinite()
+
+					&& _thrust_setpoint
+					.isAllFinite();
+
+
+				_last_reference_update =
+
+					ref.timestamp;
 			}
+		}
+
+
+		// =====================================================
+		// Reject stale outer-loop reference
+		// =====================================================
+
+		if (_last_reference_update == 0
+
+		    ||
+
+		    (hrt_absolute_time()
+		     - _last_reference_update)
+
+		    > REFERENCE_TIMEOUT_US) {
+
+			_attitude_ref_valid =
+				false;
 		}
 
 
 		// =====================================================
 		// Controller activation
-		//
-		// Same as old stable controller.
 		// =====================================================
 
 		const bool run_smc_att_ctrl =
 
-			_vehicle_control_mode.flag_control_attitude_enabled
+			_vehicle_control_mode
+			.flag_control_attitude_enabled
 
-			&& _vehicle_control_mode.flag_control_rates_enabled
+			&&
 
-			&& (_vehicle_status.vehicle_type
-			    == vehicle_status_s::VEHICLE_TYPE_ROTARY_WING);
+			_vehicle_control_mode
+			.flag_control_rates_enabled
+
+			&&
+
+			(_vehicle_status.vehicle_type
+
+			 == vehicle_status_s::
+			 VEHICLE_TYPE_ROTARY_WING);
 
 
 		if (!run_smc_att_ctrl
+
 		    || !_attitude_valid
-		    || !_attitude_sp_valid) {
 
-			_error_derivative_initialized = false;
+		    || !_attitude_ref_valid) {
 
-			_omega_d_derivative_initialized = false;
+			perf_end(
+				_loop_perf);
 
-
-			perf_end(_loop_perf);
 
 			return;
 		}
 
 
 		// =========================================================
+		// Desired trajectory frame transformation
+		//
+		// Position layer gives:
+		//
+		// omega_Rd
+		// alpha_Rd
+		//
+		// in desired body frame B_d.
+		//
+		// Current gyro is in current body frame B.
+		//
+		// Therefore:
+		//
+		// Q = R^T R_d
+		//
+		// omega_d =
+		//
+		// Q omega_Rd
+		//
+		// omega_dot_d =
+		//
+		// Q alpha_Rd
+		//
+		// - omega x omega_d
+		// =========================================================
+
+		const Dcmf R{
+			_q
+		};
+
+
+		const Dcmf R_d{
+			_q_d
+		};
+
+
+		const Dcmf Q =
+
+			R.transpose()
+
+			* R_d;
+
+
+		const Vector3f omega_d =
+
+			Q
+			* _omega_Rd;
+
+
+		const Vector3f omega_dot_d =
+    		Q * _alpha_Rd
+    		- (omega % omega_d);
+
+
+		// =========================================================
 		// Quaternion attitude error
 		//
-		// PAPER CONVENTION:
-		//
-		// q_e = q_d^* ⊗ q
-		//
-		//     = q_d^{-1} ⊗ q
-		//
+		// Paper convention:
 		//
 		// q_e =
 		//
-		// [ q_we
-		//   q_e_vec ]
-		//
-		//
-		// IMPORTANT:
-		//
-		// q_e is intentionally NOT canonicalized.
+		// q_d^{-1} otimes q
 		// =========================================================
 
 		const Quatf q_e =
 
 			_q_d.inversed()
+
 			* _q;
 
 
 		const float q_we =
-
 			q_e(0);
 
 
 		const Vector3f q_e_vec =
-
 			q_e.imag();
 
 
 		// =========================================================
 		// Unwinding-free quaternion sign
 		//
-		// sigma = sgn_+(q_we)
+		// sigma =
 		//
-		//           +1, q_we >= 0
+		// +1  if q_we >= 0
 		//
-		//           -1, q_we < 0
+		// -1  otherwise
 		// =========================================================
 
 		const float sigma =
 
 			(q_we >= 0.f)
+
 			? 1.f
+
 			: -1.f;
 
 
 		// =========================================================
-		// Quaternion error vector
+		// Quaternion attitude-error vector
 		//
 		// e_q =
 		//
-		// 2 * sigma * q_e_vec
-		//
-		//
-		// Factor 2 is intentionally retained from the
-		// old stable controller.
-		//
-		// This means the old Lambda gains can also be retained.
+		// 2 sigma q_e_vec
 		// =========================================================
 
 		const Vector3f e_q =
 
 			2.f
+
 			* sigma
+
 			* q_e_vec;
-
-
-		// =========================================================
-		// Quaternion error derivative
-		//
-		// Keep EXACTLY the old implementation:
-		//
-		// numerical derivative + LPF.
-		//
-		// Analytical quaternion derivative will be introduced
-		// only after this transition controller is verified.
-		// =========================================================
-
-		Vector3f e_q_dot{};
-
-
-		if (_error_derivative_initialized) {
-
-			e_q_dot =
-
-				(e_q - _e_q_prev)
-				/ dt;
-
-
-		} else {
-
-			e_q_dot.zero();
-
-			_e_q_dot_filt.zero();
-
-			_error_derivative_initialized = true;
-		}
-
-
-		const float alpha =
-
-			expf(
-				-6.28318530718f
-				* _e_dot_lpf_cutoff
-				* dt);
-
-
-		_e_q_dot_filt =
-
-			alpha
-			* _e_q_dot_filt
-
-			+ (1.f - alpha)
-			* e_q_dot;
-
-
-		_e_q_prev = e_q;
-
-
-		// =========================================================
-		// Desired body angular velocity
-		//
-		// KEEP OLD PX4 IMPLEMENTATION.
-		//
-		// Only yaw-rate feedforward is included.
-		// =========================================================
-
-		Vector3f omega_d{};
-
-
-		if (PX4_ISFINITE(
-			    _yaw_sp_move_rate)) {
-
-			omega_d =
-
-				_q.inversed().dcm_z()
-				* _yaw_sp_move_rate;
-		}
-
-
-		// =========================================================
-		// Desired angular acceleration
-		//
-		// KEEP OLD IMPLEMENTATION:
-		//
-		// numerical derivative + LPF.
-		// =========================================================
-
-		Vector3f omega_dot_d{};
-
-
-		if (_omega_d_derivative_initialized) {
-
-			omega_dot_d =
-
-				(omega_d - _omega_d_prev)
-				/ dt;
-
-
-		} else {
-
-			omega_dot_d.zero();
-
-			_omega_d_dot_filt.zero();
-
-			_omega_d_derivative_initialized = true;
-		}
-
-
-		const float alpha_omega_d =
-
-			expf(
-				-6.28318530718f
-				* _omega_d_dot_lpf_cutoff
-				* dt);
-
-
-		_omega_d_dot_filt =
-
-			alpha_omega_d
-			* _omega_d_dot_filt
-
-			+ (1.f - alpha_omega_d)
-			* omega_dot_d;
-
-
-		_omega_d_prev = omega_d;
 
 
 		// =========================================================
 		// Angular velocity error
 		//
-		// omega_e = omega - omega_d
+		// omega_e =
+		//
+		// omega - omega_d
 		// =========================================================
 
 		const Vector3f omega_e =
 
 			omega
+
 			- omega_d;
+
+
+		// =========================================================
+		// Analytical quaternion error derivative
+		//
+		// Experimental implementation:
+		//
+		// q_e_dot =
+		// 0.5 q_e otimes [omega_e, 0]
+		//
+		// For:
+		//
+		// e_q = 2 sigma q_e_vec
+		//
+		// therefore:
+		//
+		// e_q_dot =
+		//
+		// sigma *
+		// (
+		//   q_we * omega_e
+		//   + q_e_vec x omega_e
+		// )
+		//
+		// No numerical differentiation.
+		// No LPF.
+		// =========================================================
+
+		const Vector3f e_q_dot =
+
+			sigma
+
+			* (q_we * omega_e
+
+			   + (q_e_vec % omega_e));
 
 
 		// =========================================================
 		// Sliding surface
 		//
-		// OLD:
-		//
-		// q_error = q^{-1} q_d
-		//
-		// s_old =
-		// omega_e - Lambda e_q_old
-		//
-		//
-		// NEW:
-		//
 		// q_e = q_d^{-1} q
 		//
-		// e_q_new = -e_q_old
+		// s =
 		//
-		// therefore:
-		//
-		// s_new =
-		// omega_e + Lambda e_q_new
-		//
-		//
-		// Physically this produces the same local restoring
-		// direction as the previous stable controller.
+		// omega_e + Lambda e_q
 		// =========================================================
 
 		const Vector3f s =
@@ -544,21 +650,14 @@ MulticopterAttSmcControl::Run()
 				e_q);
 
 
-		// =========================================================
-		// Boundary-layer saturation
-		//
-		// Keep old implementation.
-		// =========================================================
-
 		const Vector3f sat_s =
 
-			saturation(s);
+			saturation(
+				s);
 
 
 		// =========================================================
 		// Newton-Euler rigid-body term
-		//
-		// J = X500 composite inertia.
 		// =========================================================
 
 		const Vector3f Iomega =
@@ -570,62 +669,48 @@ MulticopterAttSmcControl::Run()
 		const Vector3f omega_cross_Iomega =
 
 			omega
+
 			% Iomega;
 
 
 		// =========================================================
-		// SMC torque
+		// SMC torque law
 		//
 		// Since:
 		//
 		// s =
 		//
 		// omega
+		//
 		// - omega_d
+		//
 		// + Lambda e_q
 		//
 		//
-		// therefore:
-		//
-		// s_dot =
-		//
-		// omega_dot
-		// - omega_dot_d
-		// + Lambda e_q_dot
-		//
-		//
-		// Choosing:
-		//
-		// s_dot =
-		//
-		// -J^{-1} K s
-		// -J^{-1} eta sat(s)
-		//
-		//
-		// gives:
+		// choose:
 		//
 		// tau =
 		//
-		// J(omega_dot_d - Lambda e_q_dot)
+		// J(
+		//   omega_dot_d
+		//   - Lambda e_q_dot
+		// )
 		//
-		// + omega x (J omega)
+		// + omega x J omega
 		//
 		// - K s
 		//
 		// - eta sat(s)
-		//
-		//
-		// NO TDE.
 		// =========================================================
 
 		const Vector3f tau_phys =
 
 			_inertia.emult(
 
-				_omega_d_dot_filt
+				omega_dot_d
 
 				- _smc_lambda.emult(
-					_e_q_dot_filt))
+					e_q_dot))
 
 			+ omega_cross_Iomega
 
@@ -637,20 +722,22 @@ MulticopterAttSmcControl::Run()
 
 
 		// =========================================================
-		// Torque normalization
-		//
-		// Keep old structure.
+		// Physical torque -> PX4 normalized torque
 		// =========================================================
 
 		Vector3f torque_setpoint{};
 
 
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0;
+		     i < 3;
+		     i++) {
 
 			const float tau_max =
 
 				fmaxf(
+
 					_torque_max(i),
+
 					FLT_EPSILON);
 
 
@@ -665,6 +752,7 @@ MulticopterAttSmcControl::Run()
 					/ tau_max,
 
 					-1.f,
+
 					1.f)
 
 				: 0.f;
@@ -672,17 +760,20 @@ MulticopterAttSmcControl::Run()
 
 
 		// =========================================================
-		// PX4 thrust and torque messages
+		// PX4 actuator setpoints
 		// =========================================================
 
 		vehicle_thrust_setpoint_s
 		vehicle_thrust_setpoint{};
 
+
 		vehicle_torque_setpoint_s
 		vehicle_torque_setpoint{};
 
 
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0;
+		     i < 3;
+		     i++) {
 
 			vehicle_thrust_setpoint.xyz[i] =
 
@@ -694,6 +785,7 @@ MulticopterAttSmcControl::Run()
 					_thrust_setpoint(i),
 
 					-1.f,
+
 					1.f)
 
 				: 0.f;
@@ -709,93 +801,125 @@ MulticopterAttSmcControl::Run()
 					torque_setpoint(i),
 
 					-1.f,
+
 					1.f)
 
 				: 0.f;
 		}
 
 
-		vehicle_thrust_setpoint.timestamp_sample =
+		vehicle_thrust_setpoint
+		.timestamp_sample =
 
-			angular_velocity.timestamp_sample;
+			angular_velocity
+			.timestamp_sample;
 
 
-		vehicle_thrust_setpoint.timestamp =
+		vehicle_thrust_setpoint
+		.timestamp =
 
 			hrt_absolute_time();
 
 
-		_vehicle_thrust_setpoint_pub.publish(
+		_vehicle_thrust_setpoint_pub
+		.publish(
 			vehicle_thrust_setpoint);
 
 
-		vehicle_torque_setpoint.timestamp_sample =
+		vehicle_torque_setpoint
+		.timestamp_sample =
 
-			angular_velocity.timestamp_sample;
+			angular_velocity
+			.timestamp_sample;
 
 
-		vehicle_torque_setpoint.timestamp =
+		vehicle_torque_setpoint
+		.timestamp =
 
 			hrt_absolute_time();
 
 
-		_vehicle_torque_setpoint_pub.publish(
+		_vehicle_torque_setpoint_pub
+		.publish(
 			vehicle_torque_setpoint);
 
 
 		updateActuatorControlsStatus(
+
 			vehicle_torque_setpoint,
+
 			dt);
 	}
 
 
-	perf_end(_loop_perf);
+	perf_end(
+		_loop_perf);
 }
 
 
 void
-MulticopterAttSmcControl::updateActuatorControlsStatus(
-	const vehicle_torque_setpoint_s &vehicle_torque_setpoint,
+MulticopterAttSmcControl::
+updateActuatorControlsStatus(
+	const vehicle_torque_setpoint_s
+	&vehicle_torque_setpoint,
 	float dt)
 {
-	for (int i = 0; i < 3; i++) {
+	for (int i = 0;
+	     i < 3;
+	     i++) {
 
 		_control_energy[i] +=
 
-			vehicle_torque_setpoint.xyz[i]
-			* vehicle_torque_setpoint.xyz[i]
+			vehicle_torque_setpoint
+			.xyz[i]
+
+			* vehicle_torque_setpoint
+			.xyz[i]
+
 			* dt;
 	}
 
 
-	_energy_integration_time += dt;
+	_energy_integration_time +=
+		dt;
 
 
-	if (_energy_integration_time > 500e-3f) {
+	if (_energy_integration_time
+	    > 500e-3f) {
 
-		actuator_controls_status_s status{};
+		actuator_controls_status_s
+		status{};
+
 
 		status.timestamp =
-			vehicle_torque_setpoint.timestamp;
+
+			vehicle_torque_setpoint
+			.timestamp;
 
 
-		for (int i = 0; i < 3; i++) {
+		for (int i = 0;
+		     i < 3;
+		     i++) {
 
 			status.control_power[i] =
 
 				_control_energy[i]
+
 				/ _energy_integration_time;
 
 
-			_control_energy[i] = 0.f;
+			_control_energy[i] =
+				0.f;
 		}
 
 
-		_actuator_controls_status_pub.publish(
+		_actuator_controls_status_pub
+		.publish(
 			status);
 
 
-		_energy_integration_time = 0.f;
+		_energy_integration_time =
+			0.f;
 	}
 }
 
@@ -805,21 +929,23 @@ MulticopterAttSmcControl::task_spawn(
 	int argc,
 	char *argv[])
 {
-	bool vtol = false;
+	bool vtol =
+		false;
 
 
-	if (argc > 1) {
+	if (argc > 1
 
-		if (strcmp(
-			    argv[1],
-			    "vtol") == 0) {
+	    && strcmp(
+		    argv[1],
+		    "vtol") == 0) {
 
-			vtol = true;
-		}
+		vtol =
+			true;
 	}
 
 
-	MulticopterAttSmcControl *instance =
+	MulticopterAttSmcControl
+	*instance =
 
 		new MulticopterAttSmcControl(
 			vtol);
@@ -829,6 +955,7 @@ MulticopterAttSmcControl::task_spawn(
 
 		_object.store(
 			instance);
+
 
 		_task_id =
 			task_id_is_work_queue;
@@ -842,7 +969,8 @@ MulticopterAttSmcControl::task_spawn(
 
 	} else {
 
-		PX4_ERR("alloc failed");
+		PX4_ERR(
+			"alloc failed");
 	}
 
 
@@ -853,7 +981,8 @@ MulticopterAttSmcControl::task_spawn(
 		nullptr);
 
 
-	_task_id = -1;
+	_task_id =
+		-1;
 
 
 	return PX4_ERROR;
@@ -885,19 +1014,21 @@ MulticopterAttSmcControl::print_usage(
 	PRINT_MODULE_DESCRIPTION(
 		R"DESCR_STR(
 ### Description
-This implements a multicopter attitude sliding mode controller.
+Quaternion sliding mode attitude controller.
 
 Inputs:
 - vehicle_attitude
 - vehicle_angular_velocity
-- vehicle_attitude_setpoint
+- smc_attitude_reference
 
 Outputs:
 - vehicle_torque_setpoint
 - vehicle_thrust_setpoint
 
-The controller directly replaces the cascaded mc_att_control + mc_rate_control path
-for SITL verification.
+The controller directly replaces mc_att_control + mc_rate_control.
+
+Desired omega/alpha are generated analytically by the Position SMC
+and mapped into the current body frame at the angular-velocity callback rate.
 )DESCR_STR");
 
 
@@ -924,7 +1055,8 @@ for SITL verification.
 
 
 extern "C"
-__EXPORT int mc_att_smc_control_main(
+__EXPORT int
+mc_att_smc_control_main(
 	int argc,
 	char *argv[])
 {

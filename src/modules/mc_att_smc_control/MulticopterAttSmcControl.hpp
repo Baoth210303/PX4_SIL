@@ -1,6 +1,6 @@
 /****************************************************************************
  *
- *   Multicopter attitude SMC controller for PX4 SITL verification.
+ *   Multicopter quaternion SMC controller.
  *
  ****************************************************************************/
 
@@ -9,6 +9,7 @@
 #include <drivers/drv_hrt.h>
 #include <lib/matrix/matrix/math.hpp>
 #include <lib/perf/perf_counter.h>
+
 #include <px4_platform_common/defines.h>
 #include <px4_platform_common/module.h>
 #include <px4_platform_common/module_params.h>
@@ -21,14 +22,15 @@
 
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/parameter_update.h>
+#include <uORB/topics/smc_attitude_reference.h>
 #include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_attitude.h>
-#include <uORB/topics/vehicle_attitude_setpoint.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_land_detected.h>
 #include <uORB/topics/vehicle_status.h>
 #include <uORB/topics/vehicle_thrust_setpoint.h>
 #include <uORB/topics/vehicle_torque_setpoint.h>
+
 
 using namespace time_literals;
 
@@ -40,15 +42,26 @@ class MulticopterAttSmcControl :
 {
 public:
 
-	MulticopterAttSmcControl(bool vtol = false);
+	MulticopterAttSmcControl(
+		bool vtol = false);
+
 
 	~MulticopterAttSmcControl() override;
 
-	static int task_spawn(int argc, char *argv[]);
 
-	static int custom_command(int argc, char *argv[]);
+	static int task_spawn(
+		int argc,
+		char *argv[]);
 
-	static int print_usage(const char *reason = nullptr);
+
+	static int custom_command(
+		int argc,
+		char *argv[]);
+
+
+	static int print_usage(
+		const char *reason = nullptr);
+
 
 	bool init();
 
@@ -57,11 +70,15 @@ private:
 
 	void Run() override;
 
+
 	void parameters_updated();
 
+
 	void updateActuatorControlsStatus(
-		const vehicle_torque_setpoint_s &vehicle_torque_setpoint,
+		const vehicle_torque_setpoint_s
+		&vehicle_torque_setpoint,
 		float dt);
+
 
 	matrix::Vector3f saturation(
 		const matrix::Vector3f &s) const;
@@ -71,30 +88,42 @@ private:
 	// uORB subscriptions
 	// =========================================================
 
-	uORB::Subscription _vehicle_attitude_sub{
+	uORB::Subscription
+	_vehicle_attitude_sub{
 		ORB_ID(vehicle_attitude)
 	};
 
-	uORB::Subscription _vehicle_attitude_setpoint_sub{
-		ORB_ID(vehicle_attitude_setpoint)
+
+	uORB::Subscription
+	_smc_attitude_reference_sub{
+		ORB_ID(smc_attitude_reference)
 	};
 
-	uORB::Subscription _vehicle_control_mode_sub{
+
+	uORB::Subscription
+	_vehicle_control_mode_sub{
 		ORB_ID(vehicle_control_mode)
 	};
 
-	uORB::Subscription _vehicle_land_detected_sub{
+
+	uORB::Subscription
+	_vehicle_land_detected_sub{
 		ORB_ID(vehicle_land_detected)
 	};
 
-	uORB::Subscription _vehicle_status_sub{
+
+	uORB::Subscription
+	_vehicle_status_sub{
 		ORB_ID(vehicle_status)
 	};
 
-	uORB::SubscriptionInterval _parameter_update_sub{
+
+	uORB::SubscriptionInterval
+	_parameter_update_sub{
 		ORB_ID(parameter_update),
 		1_s
 	};
+
 
 	uORB::SubscriptionCallbackWorkItem
 	_vehicle_angular_velocity_sub{
@@ -112,8 +141,10 @@ private:
 		ORB_ID(actuator_controls_status_0)
 	};
 
+
 	uORB::Publication<vehicle_thrust_setpoint_s>
 	_vehicle_thrust_setpoint_pub;
+
 
 	uORB::Publication<vehicle_torque_setpoint_s>
 	_vehicle_torque_setpoint_pub;
@@ -123,38 +154,74 @@ private:
 	// PX4 states
 	// =========================================================
 
-	vehicle_control_mode_s _vehicle_control_mode{};
+	vehicle_control_mode_s
+	_vehicle_control_mode{};
 
-	vehicle_status_s _vehicle_status{};
 
-	bool _landed{true};
+	vehicle_status_s
+	_vehicle_status{};
 
-	bool _maybe_landed{true};
 
-	bool _attitude_valid{false};
+	bool _landed{
+		true
+	};
 
-	bool _attitude_sp_valid{false};
 
-	bool _error_derivative_initialized{false};
+	bool _maybe_landed{
+		true
+	};
+
+
+	bool _attitude_valid{
+		false
+	};
+
+
+	bool _attitude_ref_valid{
+		false
+	};
+
+
+	bool _reference_analytic_valid{
+		false
+	};
+
+
+	bool _reference_saturated{
+		false
+	};
+
+
+	bool _error_derivative_initialized{
+		false
+	};
 
 
 	// =========================================================
 	// Timing
 	// =========================================================
 
-	hrt_abstime _last_run{0};
+	hrt_abstime _last_run{
+		0
+	};
 
-	perf_counter_t _loop_perf;
+
+	hrt_abstime _last_reference_update{
+		0
+	};
+
+
+	static constexpr hrt_abstime
+	REFERENCE_TIMEOUT_US =
+		100_ms;
+
+
+	perf_counter_t
+	_loop_perf;
 
 
 	// =========================================================
-	// Quaternion states
-	//
-	// q:
-	// actual attitude from vehicle_attitude / EKF
-	//
-	// q_d:
-	// desired attitude from vehicle_attitude_setpoint
+	// Actual and desired attitudes
 	// =========================================================
 
 	matrix::Quatf _q{
@@ -163,6 +230,7 @@ private:
 		0.f,
 		0.f
 	};
+
 
 	matrix::Quatf _q_d{
 		1.f,
@@ -173,61 +241,74 @@ private:
 
 
 	// =========================================================
-	// PX4 attitude setpoint
-	// =========================================================
-
-	matrix::Vector3f _thrust_setpoint{};
-
-	float _yaw_sp_move_rate{0.f};
-
-
-	// =========================================================
-	// Quaternion error derivative
+	// Desired position-loop attitude trajectory
 	//
-	// Keep old numerical derivative + LPF structure.
-	// =========================================================
-
-	matrix::Vector3f _e_q_prev{};
-
-	matrix::Vector3f _e_q_dot_filt{};
-
-
-	// =========================================================
-	// Desired angular velocity
+	// omega_Rd:
+	// desired angular velocity in desired body B_d.
 	//
-	// Keep old PX4 implementation.
+	// alpha_Rd:
+	// desired angular acceleration in desired body B_d.
 	// =========================================================
 
-	matrix::Vector3f _omega_d_prev{};
+	matrix::Vector3f
+	_omega_Rd{};
 
-	matrix::Vector3f _omega_d_dot_filt{};
 
-	bool _omega_d_derivative_initialized{false};
+	matrix::Vector3f
+	_alpha_Rd{};
+
+
+	matrix::Vector3f
+	_thrust_setpoint{};
 
 
 	// =========================================================
-	// SMC gains
+	// Quaternion-error derivative
 	//
-	// Keep exactly the old stable gains.
+	// This filter is intentionally retained.
+	//
+	// It is NOT an LPF on desired omega_d or alpha_d.
+	// =========================================================
+
+	matrix::Vector3f
+	_e_q_prev{};
+
+
+	matrix::Vector3f
+	_e_q_dot_filt{};
+
+
+	float _e_dot_lpf_cutoff{
+		5.f
+	};
+
+
+	// =========================================================
+	// Attitude SMC gains
+	//
+	// Keep current verified values.
 	// =========================================================
 
 	matrix::Vector3f _smc_lambda{
-		2.0f,
-		2.4f,
-		1.3f
+		3.5f,
+		3.5f,
+		2.5f
 	};
 
+
 	matrix::Vector3f _smc_k{
-		0.016f,
+		0.04f,
 		0.028f,
-		0.007f
+		0.03f
 	};
+
 
 	matrix::Vector3f _smc_eta{
 		0.0025f,
-		0.0040f,
+		0.0025f,
 		0.0014f
 	};
+
 
 	matrix::Vector3f _smc_boundary{
 		0.40f,
@@ -237,15 +318,7 @@ private:
 
 
 	// =========================================================
-	// X500 composite inertia
-	//
-	// Calculated from x500_base.sdf:
-	//
-	// base_link + 4 rotors
-	//
-	// expressed about the complete vehicle CoM.
-	//
-	// [kg.m^2]
+	// X500 composite inertia [kg.m^2]
 	// =========================================================
 
 	matrix::Vector3f _inertia{
@@ -256,11 +329,7 @@ private:
 
 
 	// =========================================================
-	// Torque normalization
-	//
-	// Keep old values.
-	//
-	// [Nm]
+	// Physical torque normalization limits [Nm]
 	// =========================================================
 
 	matrix::Vector3f _torque_max{
@@ -271,19 +340,13 @@ private:
 
 
 	// =========================================================
-	// Filters
-	// =========================================================
-
-	float _e_dot_lpf_cutoff{5.f};
-
-	float _omega_d_dot_lpf_cutoff{5.f};
-
-
-	// =========================================================
 	// Control effort monitoring
 	// =========================================================
 
-	float _energy_integration_time{0.0f};
+	float _energy_integration_time{
+		0.0f
+	};
+
 
 	float _control_energy[4]{};
 };

@@ -55,13 +55,18 @@
 #include <px4_platform_common/px4_work_queue/ScheduledWorkItem.hpp>
 #include <px4_platform_common/posix.h>
 #include <px4_platform_common/tasks.h>
+
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
+
+#include <uORB/topics/debug_array.h>
 #include <uORB/topics/hover_thrust_estimate.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/trajectory_setpoint.h>
+#include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
+#include <uORB/topics/vehicle_angular_velocity.h>
 #include <uORB/topics/vehicle_constraints.h>
 #include <uORB/topics/vehicle_control_mode.h>
 #include <uORB/topics/vehicle_land_detected.h>
@@ -70,10 +75,13 @@
 
 using namespace time_literals;
 
-class MulticopterPositionControl : public ModuleBase<MulticopterPositionControl>, public ModuleParams,
+class MulticopterPositionControl :
+	public ModuleBase<MulticopterPositionControl>,
+	public ModuleParams,
 	public px4::ScheduledWorkItem
 {
 public:
+
 	MulticopterPositionControl(bool vtol = false);
 	~MulticopterPositionControl() override;
 
@@ -89,32 +97,103 @@ public:
 	bool init();
 
 private:
+
 	void Run() override;
 
-	TakeoffHandling _takeoff; /**< state machine and ramp to bring the vehicle off the ground without jumps */
+	TakeoffHandling _takeoff;
+	/**< state machine and ramp to bring the vehicle off the ground without jumps */
 
 	orb_advert_t _mavlink_log_pub{nullptr};
 
-	uORB::PublicationData<takeoff_status_s>              _takeoff_status_pub{ORB_ID(takeoff_status)};
-	uORB::Publication<vehicle_attitude_setpoint_s>	     _vehicle_attitude_setpoint_pub{ORB_ID(vehicle_attitude_setpoint)};
-	uORB::Publication<vehicle_local_position_setpoint_s> _local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};	/**< vehicle local position setpoint publication */
+	// ------------------------------------------------------------------
+	// Publications
+	// ------------------------------------------------------------------
 
-	uORB::SubscriptionCallbackWorkItem _local_pos_sub{this, ORB_ID(vehicle_local_position)};	/**< vehicle local position */
+	uORB::PublicationData<takeoff_status_s>
+	_takeoff_status_pub{ORB_ID(takeoff_status)};
 
-	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
+	uORB::Publication<vehicle_attitude_setpoint_s>
+	_vehicle_attitude_setpoint_pub{ORB_ID(vehicle_attitude_setpoint)};
 
-	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
-	uORB::Subscription _trajectory_setpoint_sub{ORB_ID(trajectory_setpoint)};
-	uORB::Subscription _vehicle_constraints_sub{ORB_ID(vehicle_constraints)};
-	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
-	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+	uORB::Publication<vehicle_local_position_setpoint_s>
+	_local_pos_sp_pub{ORB_ID(vehicle_local_position_setpoint)};
 
-	hrt_abstime _time_stamp_last_loop{0};		/**< time stamp of last loop iteration */
+	/**
+	 * Temporary debug publication for the desired attitude reference
+	 * expressed in the CURRENT body frame.
+	 *
+	 * debug_array name = "smc_ref":
+	 *   data[0] = omega_d_x     [rad/s]
+	 *   data[1] = omega_d_y     [rad/s]
+	 *   data[2] = omega_d_z     [rad/s]
+	 *   data[3] = omega_dot_d_x [rad/s^2]
+	 *   data[4] = omega_dot_d_y [rad/s^2]
+	 *   data[5] = omega_dot_d_z [rad/s^2]
+	 *
+	 * This is validation/logging only. The attitude SMC still uses
+	 * its existing desired-rate path until these signals are verified.
+	 */
+	uORB::Publication<debug_array_s>
+	_smc_ref_debug_pub{ORB_ID(debug_array)};
+
+	// ------------------------------------------------------------------
+	// Subscriptions
+	// ------------------------------------------------------------------
+
+	uORB::SubscriptionCallbackWorkItem
+	_local_pos_sub{this, ORB_ID(vehicle_local_position)};
+
+	uORB::SubscriptionInterval
+	_parameter_update_sub{ORB_ID(parameter_update), 1_s};
+
+	uORB::Subscription
+	_hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
+
+	uORB::Subscription
+	_trajectory_setpoint_sub{ORB_ID(trajectory_setpoint)};
+
+	uORB::Subscription
+	_vehicle_constraints_sub{ORB_ID(vehicle_constraints)};
+
+	uORB::Subscription
+	_vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
+
+	uORB::Subscription
+	_vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+
+	uORB::Subscription
+	_vehicle_attitude_sub{ORB_ID(vehicle_attitude)};
+
+	uORB::Subscription
+	_vehicle_angular_velocity_sub{ORB_ID(vehicle_angular_velocity)};
+
+	hrt_abstime _time_stamp_last_loop{0};
+	/**< time stamp of last loop iteration */
+
 	hrt_abstime _time_position_control_enabled{0};
 
-	trajectory_setpoint_s _setpoint{PositionControl::empty_trajectory_setpoint};
-	trajectory_setpoint_s _last_valid_setpoint{PositionControl::empty_trajectory_setpoint};
-	vehicle_control_mode_s _vehicle_control_mode{};
+	trajectory_setpoint_s
+	_setpoint{PositionControl::empty_trajectory_setpoint};
+
+	trajectory_setpoint_s
+	_last_valid_setpoint{PositionControl::empty_trajectory_setpoint};
+
+	vehicle_control_mode_s
+	_vehicle_control_mode{};
+
+	// Latest current attitude and body angular velocity.
+	// Used only to transform the desired reference into current body frame.
+	matrix::Quatf _q{
+		1.f,
+		0.f,
+		0.f,
+		0.f
+	};
+
+	matrix::Vector3f _omega{};
+
+	bool _attitude_valid{false};
+	bool _angular_velocity_valid{false};
 
 	vehicle_constraints_s _vehicle_constraints {
 		.timestamp = 0,
@@ -132,93 +211,210 @@ private:
 	};
 
 	DEFINE_PARAMETERS(
-		// Position Control
-		(ParamFloat<px4::params::MPC_XY_P>)         _param_mpc_xy_p,
-		(ParamFloat<px4::params::MPC_Z_P>)          _param_mpc_z_p,
-		(ParamFloat<px4::params::MPC_XY_VEL_P_ACC>) _param_mpc_xy_vel_p_acc,
-		(ParamFloat<px4::params::MPC_XY_VEL_I_ACC>) _param_mpc_xy_vel_i_acc,
-		(ParamFloat<px4::params::MPC_XY_VEL_D_ACC>) _param_mpc_xy_vel_d_acc,
-		(ParamFloat<px4::params::MPC_Z_VEL_P_ACC>)  _param_mpc_z_vel_p_acc,
-		(ParamFloat<px4::params::MPC_Z_VEL_I_ACC>)  _param_mpc_z_vel_i_acc,
-		(ParamFloat<px4::params::MPC_Z_VEL_D_ACC>)  _param_mpc_z_vel_d_acc,
-		(ParamFloat<px4::params::MPC_XY_VEL_MAX>)   _param_mpc_xy_vel_max,
-		(ParamFloat<px4::params::MPC_Z_V_AUTO_UP>)  _param_mpc_z_v_auto_up,
-		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up,
-		(ParamFloat<px4::params::MPC_Z_V_AUTO_DN>)  _param_mpc_z_v_auto_dn,
-		(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>) _param_mpc_z_vel_max_dn,
-		(ParamFloat<px4::params::MPC_TILTMAX_AIR>)  _param_mpc_tiltmax_air,
-		(ParamFloat<px4::params::MPC_THR_HOVER>)    _param_mpc_thr_hover,
-		(ParamBool<px4::params::MPC_USE_HTE>)       _param_mpc_use_hte,
-		(ParamBool<px4::params::MPC_ACC_DECOUPLE>)  _param_mpc_acc_decouple,
 
-		(ParamFloat<px4::params::MPC_VEL_LP>)       _param_mpc_vel_lp,
-		(ParamFloat<px4::params::MPC_VEL_NF_FRQ>)   _param_mpc_vel_nf_frq,
-		(ParamFloat<px4::params::MPC_VEL_NF_BW>)    _param_mpc_vel_nf_bw,
-		(ParamFloat<px4::params::MPC_VELD_LP>)      _param_mpc_veld_lp,
+		// Position Control
+		(ParamFloat<px4::params::MPC_XY_P>)
+		_param_mpc_xy_p,
+
+		(ParamFloat<px4::params::MPC_Z_P>)
+		_param_mpc_z_p,
+
+		(ParamFloat<px4::params::MPC_XY_VEL_P_ACC>)
+		_param_mpc_xy_vel_p_acc,
+
+		(ParamFloat<px4::params::MPC_XY_VEL_I_ACC>)
+		_param_mpc_xy_vel_i_acc,
+
+		(ParamFloat<px4::params::MPC_XY_VEL_D_ACC>)
+		_param_mpc_xy_vel_d_acc,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_P_ACC>)
+		_param_mpc_z_vel_p_acc,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_I_ACC>)
+		_param_mpc_z_vel_i_acc,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_D_ACC>)
+		_param_mpc_z_vel_d_acc,
+
+		(ParamFloat<px4::params::MPC_XY_VEL_MAX>)
+		_param_mpc_xy_vel_max,
+
+		(ParamFloat<px4::params::MPC_Z_V_AUTO_UP>)
+		_param_mpc_z_v_auto_up,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>)
+		_param_mpc_z_vel_max_up,
+
+		(ParamFloat<px4::params::MPC_Z_V_AUTO_DN>)
+		_param_mpc_z_v_auto_dn,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_MAX_DN>)
+		_param_mpc_z_vel_max_dn,
+
+		(ParamFloat<px4::params::MPC_TILTMAX_AIR>)
+		_param_mpc_tiltmax_air,
+
+		(ParamFloat<px4::params::MPC_THR_HOVER>)
+		_param_mpc_thr_hover,
+
+		(ParamBool<px4::params::MPC_USE_HTE>)
+		_param_mpc_use_hte,
+
+		(ParamBool<px4::params::MPC_ACC_DECOUPLE>)
+		_param_mpc_acc_decouple,
+
+		(ParamFloat<px4::params::MPC_VEL_LP>)
+		_param_mpc_vel_lp,
+
+		(ParamFloat<px4::params::MPC_VEL_NF_FRQ>)
+		_param_mpc_vel_nf_frq,
+
+		(ParamFloat<px4::params::MPC_VEL_NF_BW>)
+		_param_mpc_vel_nf_bw,
+
+		(ParamFloat<px4::params::MPC_VELD_LP>)
+		_param_mpc_veld_lp,
 
 		// Takeoff / Land
-		(ParamFloat<px4::params::COM_SPOOLUP_TIME>) _param_com_spoolup_time, /**< time to let motors spool up after arming */
-		(ParamBool<px4::params::COM_THROW_EN>)      _param_com_throw_en, /**< throw launch enabled  */
-		(ParamFloat<px4::params::MPC_TKO_RAMP_T>)   _param_mpc_tko_ramp_t,   /**< time constant for smooth takeoff ramp */
-		(ParamFloat<px4::params::MPC_TKO_SPEED>)    _param_mpc_tko_speed,
-		(ParamFloat<px4::params::MPC_LAND_SPEED>)   _param_mpc_land_speed,
+		(ParamFloat<px4::params::COM_SPOOLUP_TIME>)
+		_param_com_spoolup_time,
 
-		(ParamFloat<px4::params::MPC_VEL_MANUAL>)   _param_mpc_vel_manual,
-		(ParamFloat<px4::params::MPC_VEL_MAN_BACK>) _param_mpc_vel_man_back,
-		(ParamFloat<px4::params::MPC_VEL_MAN_SIDE>) _param_mpc_vel_man_side,
-		(ParamFloat<px4::params::MPC_XY_CRUISE>)    _param_mpc_xy_cruise,
-		(ParamFloat<px4::params::MPC_LAND_ALT2>)    _param_mpc_land_alt2,    /**< downwards speed limited below this altitude */
-		(ParamInt<px4::params::MPC_ALT_MODE>)       _param_mpc_alt_mode,
-		(ParamFloat<px4::params::MPC_TILTMAX_LND>)  _param_mpc_tiltmax_lnd,  /**< maximum tilt for landing and smooth takeoff */
-		(ParamFloat<px4::params::MPC_THR_MIN>)      _param_mpc_thr_min,
-		(ParamFloat<px4::params::MPC_THR_MAX>)      _param_mpc_thr_max,
-		(ParamFloat<px4::params::MPC_THR_XY_MARG>)  _param_mpc_thr_xy_marg,
+		(ParamBool<px4::params::COM_THROW_EN>)
+		_param_com_throw_en,
 
-		(ParamFloat<px4::params::SYS_VEHICLE_RESP>) _param_sys_vehicle_resp,
-		(ParamFloat<px4::params::MPC_ACC_HOR>)      _param_mpc_acc_hor,
-		(ParamFloat<px4::params::MPC_ACC_DOWN_MAX>) _param_mpc_acc_down_max,
-		(ParamFloat<px4::params::MPC_ACC_UP_MAX>)   _param_mpc_acc_up_max,
-		(ParamFloat<px4::params::MPC_ACC_HOR_MAX>)  _param_mpc_acc_hor_max,
-		(ParamFloat<px4::params::MPC_JERK_AUTO>)    _param_mpc_jerk_auto,
-		(ParamFloat<px4::params::MPC_JERK_MAX>)     _param_mpc_jerk_max,
-		(ParamFloat<px4::params::MPC_MAN_Y_MAX>)    _param_mpc_man_y_max,
-		(ParamFloat<px4::params::MPC_MAN_Y_TAU>)    _param_mpc_man_y_tau,
+		(ParamFloat<px4::params::MPC_TKO_RAMP_T>)
+		_param_mpc_tko_ramp_t,
 
-		(ParamFloat<px4::params::MPC_XY_VEL_ALL>)   _param_mpc_xy_vel_all,
-		(ParamFloat<px4::params::MPC_Z_VEL_ALL>)    _param_mpc_z_vel_all,
+		(ParamFloat<px4::params::MPC_TKO_SPEED>)
+		_param_mpc_tko_speed,
 
-		(ParamFloat<px4::params::MPC_XY_ERR_MAX>) _param_mpc_xy_err_max,
-		(ParamFloat<px4::params::MPC_YAWRAUTO_MAX>) _param_mpc_yawrauto_max,
-		(ParamFloat<px4::params::MPC_YAWRAUTO_ACC>) _param_mpc_yawrauto_acc
+		(ParamFloat<px4::params::MPC_LAND_SPEED>)
+		_param_mpc_land_speed,
+
+		(ParamFloat<px4::params::MPC_VEL_MANUAL>)
+		_param_mpc_vel_manual,
+
+		(ParamFloat<px4::params::MPC_VEL_MAN_BACK>)
+		_param_mpc_vel_man_back,
+
+		(ParamFloat<px4::params::MPC_VEL_MAN_SIDE>)
+		_param_mpc_vel_man_side,
+
+		(ParamFloat<px4::params::MPC_XY_CRUISE>)
+		_param_mpc_xy_cruise,
+
+		(ParamFloat<px4::params::MPC_LAND_ALT2>)
+		_param_mpc_land_alt2,
+
+		(ParamInt<px4::params::MPC_ALT_MODE>)
+		_param_mpc_alt_mode,
+
+		(ParamFloat<px4::params::MPC_TILTMAX_LND>)
+		_param_mpc_tiltmax_lnd,
+
+		(ParamFloat<px4::params::MPC_THR_MIN>)
+		_param_mpc_thr_min,
+
+		(ParamFloat<px4::params::MPC_THR_MAX>)
+		_param_mpc_thr_max,
+
+		(ParamFloat<px4::params::MPC_THR_XY_MARG>)
+		_param_mpc_thr_xy_marg,
+
+		(ParamFloat<px4::params::SYS_VEHICLE_RESP>)
+		_param_sys_vehicle_resp,
+
+		(ParamFloat<px4::params::MPC_ACC_HOR>)
+		_param_mpc_acc_hor,
+
+		(ParamFloat<px4::params::MPC_ACC_DOWN_MAX>)
+		_param_mpc_acc_down_max,
+
+		(ParamFloat<px4::params::MPC_ACC_UP_MAX>)
+		_param_mpc_acc_up_max,
+
+		(ParamFloat<px4::params::MPC_ACC_HOR_MAX>)
+		_param_mpc_acc_hor_max,
+
+		(ParamFloat<px4::params::MPC_JERK_AUTO>)
+		_param_mpc_jerk_auto,
+
+		(ParamFloat<px4::params::MPC_JERK_MAX>)
+		_param_mpc_jerk_max,
+
+		(ParamFloat<px4::params::MPC_MAN_Y_MAX>)
+		_param_mpc_man_y_max,
+
+		(ParamFloat<px4::params::MPC_MAN_Y_TAU>)
+		_param_mpc_man_y_tau,
+
+		(ParamFloat<px4::params::MPC_XY_VEL_ALL>)
+		_param_mpc_xy_vel_all,
+
+		(ParamFloat<px4::params::MPC_Z_VEL_ALL>)
+		_param_mpc_z_vel_all,
+
+		(ParamFloat<px4::params::MPC_XY_ERR_MAX>)
+		_param_mpc_xy_err_max,
+
+		(ParamFloat<px4::params::MPC_YAWRAUTO_MAX>)
+		_param_mpc_yawrauto_max,
+
+		(ParamFloat<px4::params::MPC_YAWRAUTO_ACC>)
+		_param_mpc_yawrauto_acc
 	);
 
-	math::WelfordMean<float> _sample_interval_s{};
+	math::WelfordMean<float>
+	_sample_interval_s{};
 
-	AlphaFilter<matrix::Vector2f> _vel_xy_lp_filter{};
-	AlphaFilter<float> _vel_z_lp_filter{};
+	AlphaFilter<matrix::Vector2f>
+	_vel_xy_lp_filter{};
 
-	math::NotchFilter<matrix::Vector2f> _vel_xy_notch_filter{};
-	math::NotchFilter<float> _vel_z_notch_filter{};
+	AlphaFilter<float>
+	_vel_z_lp_filter{};
 
-	AlphaFilter<matrix::Vector2f> _vel_deriv_xy_lp_filter{};
-	AlphaFilter<float> _vel_deriv_z_lp_filter{};
+	math::NotchFilter<matrix::Vector2f>
+	_vel_xy_notch_filter{};
 
-	GotoControl _goto_control; ///< class for handling smooth goto position setpoints
-	PositionControl _control; ///< class for core PID position control
+	math::NotchFilter<float>
+	_vel_z_notch_filter{};
 
-	hrt_abstime _last_warn{0}; /**< timer when the last warn message was sent out */
+	AlphaFilter<matrix::Vector2f>
+	_vel_deriv_xy_lp_filter{};
+
+	AlphaFilter<float>
+	_vel_deriv_z_lp_filter{};
+
+	GotoControl _goto_control;
+	/**< class for handling smooth goto position setpoints */
+
+	PositionControl _control;
+	/**< class for core position control */
+
+	hrt_abstime _last_warn{0};
+	/**< timer when the last warn message was sent out */
 
 	bool _hover_thrust_initialized{false};
 
-	/** Timeout in us for trajectory data to get considered invalid */
-	static constexpr uint64_t TRAJECTORY_STREAM_TIMEOUT_US = 500_ms;
+	/**
+	 * Timeout in us for trajectory data to get considered invalid
+	 */
+	static constexpr uint64_t
+	TRAJECTORY_STREAM_TIMEOUT_US = 500_ms;
 
-	/** During smooth-takeoff, below ALTITUDE_THRESHOLD the yaw-control is turned off and tilt is limited */
-	static constexpr float ALTITUDE_THRESHOLD = 0.3f;
+	/**
+	 * During smooth-takeoff, below ALTITUDE_THRESHOLD
+	 * yaw control is turned off and tilt is limited
+	 */
+	static constexpr float
+	ALTITUDE_THRESHOLD = 0.3f;
 
-	static constexpr float MAX_SAFE_TILT_DEG = 89.f; // Numerical issues above this value due to tanf
+	static constexpr float
+	MAX_SAFE_TILT_DEG = 89.f;
 
-	SlewRate<float> _tilt_limit_slew_rate;
+	SlewRate<float>
+	_tilt_limit_slew_rate;
 
 	uint8_t _vxy_reset_counter{0};
 	uint8_t _vz_reset_counter{0};
@@ -226,33 +422,41 @@ private:
 	uint8_t _z_reset_counter{0};
 	uint8_t _heading_reset_counter{0};
 
-	perf_counter_t _cycle_perf{perf_alloc(PC_ELAPSED, MODULE_NAME": cycle time")};
+	perf_counter_t
+	_cycle_perf{
+		perf_alloc(
+			PC_ELAPSED,
+			MODULE_NAME": cycle time")
+	};
 
 	/**
 	 * Update our local parameter cache.
 	 * Parameter update can be forced when argument is true.
+	 *
 	 * @param force forces parameter update.
 	 */
 	void parameters_update(bool force);
 
 	/**
-	 * Check for validity of positon/velocity states.
+	 * Check for validity of position/velocity states.
 	 */
-	PositionControlStates set_vehicle_states(const vehicle_local_position_s &local_pos, const float dt_s);
+	PositionControlStates set_vehicle_states(
+		const vehicle_local_position_s &local_pos,
+		const float dt_s);
 
 	/**
-	 * Generate setpoint to bridge no executable setpoint being available.
-	 * Used to handle transitions where no proper setpoint was generated yet and when the received setpoint is invalid.
-	 * This should only happen briefly when transitioning and never during mode operation or by design.
+	 * Generate setpoint to bridge no executable setpoint
+	 * being available.
 	 */
-	trajectory_setpoint_s generateFailsafeSetpoint(const hrt_abstime &now, const PositionControlStates &states, bool warn);
+	trajectory_setpoint_s generateFailsafeSetpoint(
+		const hrt_abstime &now,
+		const PositionControlStates &states,
+		bool warn);
 
 	/**
-	 * @brief adjust existing (or older) setpoint with any EKF reset deltas and update the local counters
-	 *
-	 * @param[in] vehicle_local_position struct containing EKF reset deltas and counters
-	 * @param[out] setpoint trajectory setpoint struct to be adjusted
+	 * Adjust existing setpoint with EKF reset deltas.
 	 */
-	void adjustSetpointForEKFResets(const vehicle_local_position_s &vehicle_local_position,
-					trajectory_setpoint_s &setpoint);
+	void adjustSetpointForEKFResets(
+		const vehicle_local_position_s &vehicle_local_position,
+		trajectory_setpoint_s &setpoint);
 };
