@@ -166,6 +166,7 @@ set(msg_files
 	PositionControllerStatus.msg
 	PositionSetpoint.msg
 	PositionSetpointTriplet.msg
+	SmcPositionReference.msg
 	PowerButtonState.msg
 	PowerMonitor.msg
 	PpsCapture.msg
