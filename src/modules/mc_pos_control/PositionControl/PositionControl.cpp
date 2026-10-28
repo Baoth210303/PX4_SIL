@@ -113,8 +113,7 @@ bool PositionControl::update(const float dt)
 	bool valid = _inputValid();
 
 	if (valid) {
-		_positionControl();
-		_velocityControl(dt);
+		_smcPositionVelocityControl();
 
 		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
 		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
@@ -204,6 +203,115 @@ void PositionControl::_velocityControl(const float dt)
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
 }
 
+void PositionControl::_smcPositionVelocityControl()
+{
+	/*
+	 * Preserve PX4 setpoint semantics:
+	 *
+	 * - finite position setpoint    -> position tracking
+	 * - finite velocity setpoint    -> velocity tracking / feed-forward
+	 * - finite acceleration setpoint -> acceleration feed-forward
+	 *
+	 * NAN means that particular setpoint component is not commanded.
+	 */
+	Vector3f e{};
+	Vector3f e_dot{};
+	Vector3f acc_ff = _acc_sp;
+
+	for (int i = 0; i < 3; i++) {
+		const bool has_pos_sp = PX4_ISFINITE(_pos_sp(i));
+		const bool has_vel_sp = PX4_ISFINITE(_vel_sp(i));
+
+		if (has_pos_sp) {
+			e(i) = _pos(i) - _pos_sp(i);
+
+			// If no velocity feed-forward is supplied, track zero
+			// velocity while converging to the position setpoint.
+			const float vel_sp = has_vel_sp ? _vel_sp(i) : 0.f;
+			e_dot(i) = _vel(i) - vel_sp;
+
+		} else if (has_vel_sp) {
+			// Velocity-only control: no position-error contribution.
+			e(i) = 0.f;
+			e_dot(i) = _vel(i) - _vel_sp(i);
+
+		} else {
+			// Acceleration-only feed-forward: no feedback error terms.
+			e(i) = 0.f;
+			e_dot(i) = 0.f;
+		}
+
+		if (!PX4_ISFINITE(acc_ff(i))) {
+			acc_ff(i) = 0.f;
+		}
+	}
+
+	/*
+	 * Translational SMC:
+	 *
+	 * e     = p - p_d
+	 * e_dot = v - v_d
+	 * s     = e_dot + Lambda e
+	 *
+	 * a_cmd = a_d
+	 *         - Lambda e_dot
+	 *         - K s
+	 *         - eta tanh(rho s)
+	 */
+	const Vector3f sliding_surface = e_dot + e.emult(_smc_lambda);
+
+	Vector3f switching_term{};
+
+	for (int i = 0; i < 3; i++) {
+		switching_term(i) = tanhf(_smc_rho(i) * sliding_surface(i));
+	}
+
+	_acc_sp = acc_ff
+		  - e_dot.emult(_smc_lambda)
+		  - sliding_surface.emult(_smc_k)
+		  - switching_term.emult(_smc_eta);
+
+	/*
+	 * Keep PX4's original acceleration-to-thrust conversion.
+	 * This preserves tilt limiting, hover-thrust scaling and the
+	 * existing thrust-vector convention.
+	 */
+	_accelerationControl();
+
+	/*
+	 * Keep PX4's original thrust saturation strategy.
+	 * PID anti-windup is deliberately not copied because the SMC
+	 * controller has no velocity integrator.
+	 */
+	const Vector2f thrust_sp_xy(_thr_sp);
+	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
+	const float thrust_max_squared = math::sq(_lim_thr_max);
+
+	const float allocated_horizontal_thrust =
+		math::min(thrust_sp_xy_norm, _lim_thr_xy_margin);
+
+	const float thrust_z_max_squared =
+		thrust_max_squared - math::sq(allocated_horizontal_thrust);
+
+	_thr_sp(2) =
+		math::max(_thr_sp(2), -sqrtf(thrust_z_max_squared));
+
+	const float thrust_max_xy_squared =
+		thrust_max_squared - math::sq(_thr_sp(2));
+
+	float thrust_max_xy = 0.f;
+
+	if (thrust_max_xy_squared > 0.f) {
+		thrust_max_xy = sqrtf(thrust_max_xy_squared);
+	}
+
+	if (thrust_sp_xy_norm > thrust_max_xy
+	    && thrust_sp_xy_norm > FLT_EPSILON) {
+		_thr_sp.xy() =
+			thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
+	}
+}
+
 void PositionControl::_accelerationControl()
 {
 	// Assume standard acceleration due to gravity in vertical direction for attitude generation
@@ -241,7 +349,8 @@ bool PositionControl::_inputValid()
 	// For each controlled state the estimate has to be valid
 	for (int i = 0; i <= 2; i++) {
 		if (PX4_ISFINITE(_pos_sp(i))) {
-			valid = valid && PX4_ISFINITE(_pos(i));
+			// Position SMC uses both position and velocity feedback.
+			valid = valid && PX4_ISFINITE(_pos(i)) && PX4_ISFINITE(_vel(i));
 		}
 
 		if (PX4_ISFINITE(_vel_sp(i))) {

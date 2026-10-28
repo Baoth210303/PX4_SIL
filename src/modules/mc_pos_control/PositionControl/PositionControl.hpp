@@ -199,6 +199,7 @@ private:
 
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
+	void _smcPositionVelocityControl(); ///< Full SMC translational control
 	void _accelerationControl(); ///< Acceleration setpoint processing
 
 	// Gains
@@ -206,6 +207,12 @@ private:
 	matrix::Vector3f _gain_vel_p; ///< Velocity control proportional gain
 	matrix::Vector3f _gain_vel_i; ///< Velocity control integral gain
 	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
+
+	// Position SMC gains
+	matrix::Vector3f _smc_lambda{1.8f, 1.8f, 1.5f};
+	matrix::Vector3f _smc_k{1.5f, 1.5f, 1.2f};
+	matrix::Vector3f _smc_eta{0.8f, 0.8f, 0.6f};
+	matrix::Vector3f _smc_rho{0.9f, 0.9f, 0.9f};
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control
