@@ -196,6 +196,9 @@ public:
 	const matrix::Vector3f &getKappaDot() const { return _kappa_dot; }
 	const matrix::Vector3f &getKappaDDot() const { return _kappa_ddot; }
 
+	float getYawSetpoint() const { return _yaw_sp; }
+	float getYawSpeedSetpoint() const { return _yawspeed_sp; }
+
 	bool smcPositionReferenceValid() const { return _smc_position_reference_valid; }
 	bool smcPositionReferenceSaturated() const { return _smc_position_reference_saturated; }
 

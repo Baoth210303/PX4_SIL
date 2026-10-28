@@ -612,6 +612,22 @@ void MulticopterPositionControl::Run()
 			attitude_setpoint.timestamp = hrt_absolute_time();
 			_vehicle_attitude_setpoint_pub.publish(attitude_setpoint);
 
+			// Publish Position-SMC translational reference for mc_att_control.
+			smc_position_reference_s smc_position_reference{};
+
+			_control.getKappa().copyTo(smc_position_reference.kappa);
+			_control.getKappaDot().copyTo(smc_position_reference.kappa_dot);
+			_control.getKappaDDot().copyTo(smc_position_reference.kappa_ddot);
+
+			smc_position_reference.yaw = _control.getYawSetpoint();
+			smc_position_reference.yawspeed = _control.getYawSpeedSetpoint();
+
+			smc_position_reference.valid = _control.smcPositionReferenceValid();
+			smc_position_reference.saturated = _control.smcPositionReferenceSaturated();
+			smc_position_reference.timestamp = hrt_absolute_time();
+
+			_smc_position_reference_pub.publish(smc_position_reference);
+
 		} else {
 			// an update is necessary here because otherwise the takeoff state doesn't get skipped with non-altitude-controlled modes
 			_takeoff.updateTakeoffState(_vehicle_control_mode.flag_armed, _vehicle_land_detected.landed, false, 10.f, true,
