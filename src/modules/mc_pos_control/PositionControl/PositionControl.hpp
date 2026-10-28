@@ -186,6 +186,20 @@ public:
 	void getAttitudeSetpoint(vehicle_attitude_setpoint_s &attitude_setpoint) const;
 
 	/**
+	 * Get the translational force-direction reference used by the
+	 * analytical attitude-reference generator.
+	 *
+	 * Only mathematical state is exposed here. uORB publication
+	 * remains the responsibility of mc_pos_control.
+	 */
+	const matrix::Vector3f &getKappa() const { return _kappa; }
+	const matrix::Vector3f &getKappaDot() const { return _kappa_dot; }
+	const matrix::Vector3f &getKappaDDot() const { return _kappa_ddot; }
+
+	bool smcPositionReferenceValid() const { return _smc_position_reference_valid; }
+	bool smcPositionReferenceSaturated() const { return _smc_position_reference_saturated; }
+
+	/**
 	 * All setpoints are set to NAN (uncontrolled). Timestampt zero.
 	 */
 	static const trajectory_setpoint_s empty_trajectory_setpoint;
@@ -199,7 +213,7 @@ private:
 
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
-	void _smcPositionVelocityControl(); ///< Full SMC translational control
+	void _smcPositionVelocityControl(const float dt); ///< Full SMC translational control
 	void _accelerationControl(); ///< Acceleration setpoint processing
 
 	// Gains
@@ -213,6 +227,23 @@ private:
 	matrix::Vector3f _smc_k{1.5f, 1.5f, 1.2f};
 	matrix::Vector3f _smc_eta{0.8f, 0.8f, 0.6f};
 	matrix::Vector3f _smc_rho{0.9f, 0.9f, 0.9f};
+
+	// Position-SMC analytical translational reference
+	matrix::Vector3f _kappa{};
+	matrix::Vector3f _kappa_dot{};
+	matrix::Vector3f _kappa_ddot{};
+
+	bool _smc_position_reference_valid{false};
+	bool _smc_position_reference_saturated{false};
+
+	// Per-instance derivative history
+	matrix::Vector3f _smc_acc_ff_prev{};
+	matrix::Vector3f _smc_jerk_des_prev{};
+	matrix::Vector3f _smc_acc_meas_prev{};
+
+	bool _smc_acc_ff_history_initialized{false};
+	bool _smc_jerk_des_history_initialized{false};
+	bool _smc_acc_meas_history_initialized{false};
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control

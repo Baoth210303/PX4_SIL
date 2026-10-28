@@ -113,7 +113,7 @@ bool PositionControl::update(const float dt)
 	bool valid = _inputValid();
 
 	if (valid) {
-		_smcPositionVelocityControl();
+		_smcPositionVelocityControl(dt);
 
 		_yawspeed_sp = PX4_ISFINITE(_yawspeed_sp) ? _yawspeed_sp : 0.f;
 		_yaw_sp = PX4_ISFINITE(_yaw_sp) ? _yaw_sp : _yaw; // TODO: better way to disable yaw control
@@ -203,7 +203,7 @@ void PositionControl::_velocityControl(const float dt)
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
 }
 
-void PositionControl::_smcPositionVelocityControl()
+void PositionControl::_smcPositionVelocityControl(const float dt)
 {
 	/*
 	 * Preserve PX4 setpoint semantics:
@@ -247,6 +247,78 @@ void PositionControl::_smcPositionVelocityControl()
 	}
 
 	/*
+	 * Reset analytical-reference status for this sample.
+	 * The reference becomes valid again only after all required
+	 * quantities have been computed successfully.
+	 */
+	_smc_position_reference_valid = false;
+	_smc_position_reference_saturated = false;
+	_kappa.zero();
+	_kappa_dot.zero();
+	_kappa_ddot.zero();
+
+	/*
+	 * Derivative timing.
+	 */
+	const bool derivative_dt_valid =
+		PX4_ISFINITE(dt) && dt > 1e-4f && dt < 0.1f;
+
+	/*
+	 * Analytical derivatives are considered valid only when all
+	 * required histories already existed before this control sample.
+	 */
+	const bool derivative_history_valid =
+		derivative_dt_valid
+		&& _smc_acc_ff_history_initialized
+		&& _smc_jerk_des_history_initialized
+		&& _smc_acc_meas_history_initialized;
+
+	/*
+	 * Desired acceleration derivatives.
+	 *
+	 * Keep the same convention as the public implementation used
+	 * previously for comparison with the paper:
+	 *
+	 * jerk_d = (a_d[k] - a_d[k-1]) * dt
+	 * snap_d = (jerk_d[k] - jerk_d[k-1]) * dt
+	 *
+	 * This intentionally is not the conventional finite difference /dt.
+	 */
+	Vector3f jerk_des{};
+
+	if (_smc_acc_ff_history_initialized && derivative_dt_valid) {
+		jerk_des = (acc_ff - _smc_acc_ff_prev) * dt;
+	}
+
+	_smc_acc_ff_prev = acc_ff;
+	_smc_acc_ff_history_initialized = true;
+
+	Vector3f snap_des{};
+
+	if (_smc_jerk_des_history_initialized && derivative_dt_valid) {
+		snap_des = (jerk_des - _smc_jerk_des_prev) * dt;
+	}
+
+	_smc_jerk_des_prev = jerk_des;
+	_smc_jerk_des_history_initialized = true;
+
+	/*
+	 * Current translational acceleration and jerk.
+	 * _vel_dot is PX4's velocity derivative estimate.
+	 */
+	Vector3f acc_meas = _vel_dot;
+	ControlMath::setZeroIfNanVector3f(acc_meas);
+
+	Vector3f jerk_meas{};
+
+	if (_smc_acc_meas_history_initialized && derivative_dt_valid) {
+		jerk_meas = (acc_meas - _smc_acc_meas_prev) * dt;
+	}
+
+	_smc_acc_meas_prev = acc_meas;
+	_smc_acc_meas_history_initialized = true;
+
+	/*
 	 * Translational SMC:
 	 *
 	 * e     = p - p_d
@@ -261,15 +333,139 @@ void PositionControl::_smcPositionVelocityControl()
 	const Vector3f sliding_surface = e_dot + e.emult(_smc_lambda);
 
 	Vector3f switching_term{};
+	Vector3f sech2{};
 
 	for (int i = 0; i < 3; i++) {
-		switching_term(i) = tanhf(_smc_rho(i) * sliding_surface(i));
+		const float z = _smc_rho(i) * sliding_surface(i);
+		switching_term(i) = tanhf(z);
+		sech2(i) = 1.f - switching_term(i) * switching_term(i);
 	}
 
-	_acc_sp = acc_ff
-		  - e_dot.emult(_smc_lambda)
-		  - sliding_surface.emult(_smc_k)
-		  - switching_term.emult(_smc_eta);
+	/*
+	 * Acceleration/jerk tracking errors and sliding-variable derivatives.
+	 */
+	const Vector3f e_acc = acc_meas - acc_ff;
+	const Vector3f e_jerk = jerk_meas - jerk_des;
+
+	const Vector3f sliding_surface_dot =
+		e_acc + e_dot.emult(_smc_lambda);
+
+	const Vector3f sliding_surface_ddot =
+		e_jerk + e_acc.emult(_smc_lambda);
+
+	/*
+	 * Derivatives of phi = tanh(rho * s).
+	 */
+	Vector3f switching_term_dot{};
+	Vector3f switching_term_ddot{};
+
+	for (int i = 0; i < 3; i++) {
+		const float rho = _smc_rho(i);
+
+		switching_term_dot(i) =
+			rho * sech2(i) * sliding_surface_dot(i);
+
+		switching_term_ddot(i) =
+			rho * sech2(i) * sliding_surface_ddot(i)
+			- 2.f * rho * rho
+			* sech2(i) * switching_term(i)
+			* sliding_surface_dot(i) * sliding_surface_dot(i);
+	}
+
+	/*
+	 * Position-SMC acceleration command and its analytical derivatives.
+	 */
+	const Vector3f acc_cmd =
+		acc_ff
+		- e_dot.emult(_smc_lambda)
+		- sliding_surface.emult(_smc_k)
+		- switching_term.emult(_smc_eta);
+
+	const Vector3f acc_cmd_dot =
+		jerk_des
+		- e_acc.emult(_smc_lambda)
+		- sliding_surface_dot.emult(_smc_k)
+		- switching_term_dot.emult(_smc_eta);
+
+	const Vector3f acc_cmd_ddot =
+		snap_des
+		- e_jerk.emult(_smc_lambda)
+		- sliding_surface_ddot.emult(_smc_k)
+		- switching_term_ddot.emult(_smc_eta);
+
+	_acc_sp = acc_cmd;
+
+	/*
+	 * Force-direction reference for the attitude layer.
+	 *
+	 * This is still translational information only. The attitude layer
+	 * will later construct R_d, q_d, omega_Rd and alpha_Rd.
+	 */
+	_kappa = Vector3f(
+		-acc_cmd(0),
+		-acc_cmd(1),
+		CONSTANTS_ONE_G);
+
+	_kappa_dot = Vector3f(
+		-acc_cmd_dot(0),
+		-acc_cmd_dot(1),
+		0.f);
+
+	_kappa_ddot = Vector3f(
+		-acc_cmd_ddot(0),
+		-acc_cmd_ddot(1),
+		0.f);
+
+	if (!_decouple_horizontal_and_vertical_acceleration) {
+		_kappa(2) = CONSTANTS_ONE_G - acc_cmd(2);
+		_kappa_dot(2) = -acc_cmd_dot(2);
+		_kappa_ddot(2) = -acc_cmd_ddot(2);
+	}
+
+	/*
+	 * Analytical derivatives cannot be used until the derivative
+	 * histories are initialized and all quantities are finite.
+	 */
+	if (!derivative_history_valid
+	    || !_kappa.isAllFinite()
+	    || !_kappa_dot.isAllFinite()
+	    || !_kappa_ddot.isAllFinite()) {
+
+		_kappa_dot.zero();
+		_kappa_ddot.zero();
+	}
+
+	/*
+	 * Detect whether PX4's tilt limiter will modify the desired
+	 * thrust direction. If it does, the analytical derivatives no
+	 * longer represent the attitude setpoint actually sent downstream.
+	 */
+	const float kappa_norm = _kappa.norm();
+
+	if (!PX4_ISFINITE(kappa_norm) || kappa_norm <= FLT_EPSILON) {
+		_kappa.zero();
+		_kappa_dot.zero();
+		_kappa_ddot.zero();
+
+	} else {
+		const Vector3f body_z_unlimited = _kappa / kappa_norm;
+
+		const float cos_tilt = math::constrain(
+			body_z_unlimited.dot(Vector3f(0.f, 0.f, 1.f)),
+			-1.f,
+			1.f);
+
+		const float tilt = acosf(cos_tilt);
+
+		if (PX4_ISFINITE(_lim_tilt)
+		    && _lim_tilt > 0.f
+		    && tilt > (_lim_tilt + 1e-4f)) {
+
+			_smc_position_reference_saturated = true;
+			_kappa_dot.zero();
+			_kappa_ddot.zero();
+		}
+	}
 
 	/*
 	 * Keep PX4's original acceleration-to-thrust conversion.
@@ -283,6 +479,8 @@ void PositionControl::_smcPositionVelocityControl()
 	 * PID anti-windup is deliberately not copied because the SMC
 	 * controller has no velocity integrator.
 	 */
+	const Vector3f thrust_before_saturation = _thr_sp;
+
 	const Vector2f thrust_sp_xy(_thr_sp);
 	const float thrust_sp_xy_norm = thrust_sp_xy.norm();
 	const float thrust_max_squared = math::sq(_lim_thr_max);
@@ -309,6 +507,39 @@ void PositionControl::_smcPositionVelocityControl()
 	    && thrust_sp_xy_norm > FLT_EPSILON) {
 		_thr_sp.xy() =
 			thrust_sp_xy / thrust_sp_xy_norm * thrust_max_xy;
+	}
+
+	/*
+	 * If thrust saturation changed the vector sent downstream,
+	 * the analytical kappa derivatives no longer describe exactly
+	 * the attitude setpoint generated from the final thrust vector.
+	 */
+	if ((_thr_sp - thrust_before_saturation).norm() > 1e-5f) {
+		_smc_position_reference_saturated = true;
+		_kappa_dot.zero();
+		_kappa_ddot.zero();
+	}
+
+	/*
+	 * Publishable analytical reference is valid only when:
+	 *  - derivative histories are established,
+	 *  - all reference quantities are finite and non-degenerate,
+	 *  - no PX4 tilt/thrust saturation modified the commanded direction.
+	 */
+	const float final_kappa_norm = _kappa.norm();
+
+	_smc_position_reference_valid =
+		derivative_history_valid
+		&& _kappa.isAllFinite()
+		&& _kappa_dot.isAllFinite()
+		&& _kappa_ddot.isAllFinite()
+		&& PX4_ISFINITE(final_kappa_norm)
+		&& final_kappa_norm > FLT_EPSILON
+		&& !_smc_position_reference_saturated;
+
+	if (!_smc_position_reference_valid) {
+		_kappa_dot.zero();
+		_kappa_ddot.zero();
 	}
 }
 
