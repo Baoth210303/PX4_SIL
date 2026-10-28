@@ -41,13 +41,19 @@
 #include <px4_platform_common/module_params.h>
 #include <px4_platform_common/posix.h>
 #include <px4_platform_common/px4_work_queue/WorkItem.hpp>
+
 #include <uORB/Publication.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/SubscriptionCallback.hpp>
+
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/autotune_attitude_control_status.h>
 #include <uORB/topics/hover_thrust_estimate.h>
+
+#include <uORB/topics/smc_position_reference.h>
+#include <uORB/topics/smc_attitude_reference.h>
+
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_attitude_setpoint.h>
 #include <uORB/topics/vehicle_control_mode.h>
@@ -55,6 +61,7 @@
 #include <uORB/topics/vehicle_local_position.h>
 #include <uORB/topics/vehicle_rates_setpoint.h>
 #include <uORB/topics/vehicle_status.h>
+
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
 #include <lib/slew_rate/SlewRate.hpp>
 #include <lib/stick_yaw/StickYaw.hpp>
@@ -85,22 +92,35 @@ private:
 	void Run() override;
 
 	/**
-	 * initialize some vectors/matrices from parameters
+	 * Initialize some vectors/matrices from parameters.
 	 */
 	void parameters_updated();
 
 	float throttle_curve(float throttle_stick_input);
 
 	/**
-	 * Generate & publish an attitude setpoint from stick inputs
+	 * Generate & publish an attitude setpoint from stick inputs.
 	 */
 	void generate_attitude_setpoint(const matrix::Quatf &q, float dt);
 
-	AttitudeControl _attitude_control; /**< class for attitude control calculations */
+	/*
+	 * Keep the stock PX4 attitude-control helper.
+	 *
+	 * This remains available for the original/manual attitude path and
+	 * for safe fallback when an analytical SMC reference is unavailable.
+	 */
+	AttitudeControl _attitude_control;
+
 	StickYaw _stick_yaw{this};
 
+	/*
+	 * Parameter update.
+	 */
 	uORB::SubscriptionInterval _parameter_update_sub{ORB_ID(parameter_update), 1_s};
 
+	/*
+	 * Stock PX4 subscriptions.
+	 */
 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
 	uORB::Subscription _vehicle_attitude_setpoint_sub{ORB_ID(vehicle_attitude_setpoint)};
 	uORB::Subscription _autotune_attitude_control_status_sub{ORB_ID(autotune_attitude_control_status)};
@@ -110,15 +130,63 @@ private:
 	uORB::Subscription _vehicle_local_position_sub{ORB_ID(vehicle_local_position)};
 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
 
+	/*
+	 * Position-SMC translational reference.
+	 *
+	 * mc_pos_control publishes:
+	 *
+	 *   kappa
+	 *   kappa_dot
+	 *   kappa_ddot
+	 *   yaw
+	 *   yawspeed
+	 *
+	 * mc_att_control will use these quantities to construct:
+	 *
+	 *   R_d
+	 *   q_d
+	 *   omega_Rd
+	 *   alpha_Rd
+	 */
+	uORB::Subscription _smc_position_reference_sub{ORB_ID(smc_position_reference)};
+
+	/*
+	 * Main attitude callback remains exactly the stock PX4 callback.
+	 */
 	uORB::SubscriptionCallbackWorkItem _vehicle_attitude_sub{this, ORB_ID(vehicle_attitude)};
 
-	uORB::Publication<vehicle_rates_setpoint_s>     _vehicle_rates_setpoint_pub{ORB_ID(vehicle_rates_setpoint)};    /**< rate setpoint publication */
-	uORB::Publication<vehicle_attitude_setpoint_s>  _vehicle_attitude_setpoint_pub;
+	/*
+	 * Stock PX4 publications.
+	 */
+	uORB::Publication<vehicle_rates_setpoint_s> _vehicle_rates_setpoint_pub{
+		ORB_ID(vehicle_rates_setpoint)
+	};
 
-	manual_control_setpoint_s       _manual_control_setpoint {};    /**< manual control setpoint */
-	vehicle_control_mode_s          _vehicle_control_mode {};       /**< vehicle control mode */
+	uORB::Publication<vehicle_attitude_setpoint_s> _vehicle_attitude_setpoint_pub;
 
-	perf_counter_t  _loop_perf;             /**< loop duration performance counter */
+	/*
+	 * Supplemental analytical attitude reference for mc_rate_control.
+	 *
+	 * This does not replace vehicle_rates_setpoint. The stock PX4
+	 * module interface is preserved and the additional topic carries
+	 * only the information required by Quaternion SMC.
+	 */
+	uORB::Publication<smc_attitude_reference_s> _smc_attitude_reference_pub{
+		ORB_ID(smc_attitude_reference)
+	};
+
+	/*
+	 * Latest valid/candidate Position-SMC reference.
+	 *
+	 * Stored as module state so the attitude callback can operate at
+	 * its own update rate while explicitly checking timestamp freshness.
+	 */
+	smc_position_reference_s _smc_position_reference{};
+
+	manual_control_setpoint_s _manual_control_setpoint{}; /**< manual control setpoint */
+	vehicle_control_mode_s _vehicle_control_mode{};       /**< vehicle control mode */
+
+	perf_counter_t _loop_perf; /**< loop duration performance counter */
 
 	matrix::Vector3f _thrust_setpoint_body; /**< body frame 3D thrust vector */
 
@@ -127,10 +195,11 @@ private:
 
 	float _yaw_setpoint_stabilized{0.f};
 	float _unaided_heading{NAN}; // initialized NAN to not distract heading lock when local position never published
-	float _man_tilt_max{0.f};			/**< maximum tilt allowed for manual flight [rad] */
+	float _man_tilt_max{0.f};    /**< maximum tilt allowed for manual flight [rad] */
 
 	SlewRate<float> _manual_throttle_minimum{0.f}; ///< 0 when landed and ramped to MPC_MANTHR_MIN in air
 	SlewRate<float> _manual_throttle_maximum{0.f}; ///< 0 when disarmed ramped to 1 when spooled up
+
 	AlphaFilter<float> _man_roll_input_filter;
 	AlphaFilter<float> _man_pitch_input_filter;
 
@@ -160,12 +229,12 @@ private:
 		(ParamFloat<px4::params::MC_YAWRATE_MAX>)   _param_mc_yawrate_max,
 
 		/* Stabilized mode params */
-		(ParamFloat<px4::params::MAN_DEADZONE>) _param_man_deadzone,
+		(ParamFloat<px4::params::MAN_DEADZONE>)     _param_man_deadzone,
 		(ParamFloat<px4::params::MPC_MAN_TILT_MAX>) _param_mpc_man_tilt_max,
-		(ParamFloat<px4::params::MPC_MANTHR_MIN>) _param_mpc_manthr_min,
-		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
-		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_mpc_thr_hover,
-		(ParamInt<px4::params::MPC_THR_CURVE>) _param_mpc_thr_curve,
+		(ParamFloat<px4::params::MPC_MANTHR_MIN>)   _param_mpc_manthr_min,
+		(ParamFloat<px4::params::MPC_THR_MAX>)      _param_mpc_thr_max,
+		(ParamFloat<px4::params::MPC_THR_HOVER>)    _param_mpc_thr_hover,
+		(ParamInt<px4::params::MPC_THR_CURVE>)      _param_mpc_thr_curve,
 
 		(ParamFloat<px4::params::COM_SPOOLUP_TIME>) _param_com_spoolup_time
 	)
