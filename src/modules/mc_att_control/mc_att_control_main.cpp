@@ -53,6 +53,186 @@
 
 using namespace matrix;
 
+
+namespace
+{
+
+static constexpr hrt_abstime SMC_POSITION_REFERENCE_TIMEOUT = 100_ms;
+
+Matrix3f skewMatrix(const Vector3f &v)
+{
+	Matrix3f S{};
+
+	S(0, 1) = -v(2);
+	S(0, 2) = v(1);
+	S(1, 0) = v(2);
+	S(1, 2) = -v(0);
+	S(2, 0) = -v(1);
+	S(2, 1) = v(0);
+
+	return S;
+}
+
+Vector3f veeSkew(const Matrix3f &M)
+{
+	return Vector3f(
+		0.5f * (M(2, 1) - M(1, 2)),
+		0.5f * (M(0, 2) - M(2, 0)),
+		0.5f * (M(1, 0) - M(0, 1)));
+}
+
+bool normalizedVectorDerivatives(const Vector3f &v,
+				 const Vector3f &v_dot,
+				 const Vector3f &v_ddot,
+				 Vector3f &n,
+				 Vector3f &n_dot,
+				 Vector3f &n_ddot)
+{
+	const float r = v.norm();
+
+	if (!PX4_ISFINITE(r) || r < 1e-5f) {
+		n.zero();
+		n_dot.zero();
+		n_ddot.zero();
+		return false;
+	}
+
+	n = v / r;
+
+	const float r_dot = n.dot(v_dot);
+
+	n_dot = (v_dot - n * r_dot) / r;
+
+	n_ddot =
+		(v_ddot - n * n.dot(v_ddot)) / r
+		- 2.f * (r_dot / r) * n_dot
+		- n * n_dot.norm_squared();
+
+	return n.isAllFinite() && n_dot.isAllFinite() && n_ddot.isAllFinite();
+}
+
+bool generateSmcAttitudeReference(const smc_position_reference_s &position_reference,
+				  smc_attitude_reference_s &attitude_reference)
+{
+	attitude_reference = {};
+	attitude_reference.q_d[0] = 1.f;
+	attitude_reference.saturated = position_reference.saturated;
+
+	if (!position_reference.valid || position_reference.saturated) {
+		return false;
+	}
+
+	const Vector3f kappa{position_reference.kappa};
+	const Vector3f kappa_dot{position_reference.kappa_dot};
+	const Vector3f kappa_ddot{position_reference.kappa_ddot};
+
+	if (!kappa.isAllFinite() || !kappa_dot.isAllFinite() || !kappa_ddot.isAllFinite()) {
+		return false;
+	}
+
+	const float psi = position_reference.yaw;
+	const float psi_dot = position_reference.yawspeed;
+
+	if (!PX4_ISFINITE(psi) || !PX4_ISFINITE(psi_dot)) {
+		return false;
+	}
+
+	Vector3f b3d{};
+	Vector3f b3d_dot{};
+	Vector3f b3d_ddot{};
+
+	if (!normalizedVectorDerivatives(kappa, kappa_dot, kappa_ddot,
+					 b3d, b3d_dot, b3d_ddot)) {
+		return false;
+	}
+
+	const Vector3f b1r(
+		cosf(psi),
+		sinf(psi),
+		0.f);
+
+	const Vector3f b1r_dot(
+		-sinf(psi) * psi_dot,
+		 cosf(psi) * psi_dot,
+		0.f);
+
+	// Same assumption as the reference implementation: yaw angular acceleration = 0.
+	const Vector3f b1r_ddot(
+		-cosf(psi) * psi_dot * psi_dot,
+		-sinf(psi) * psi_dot * psi_dot,
+		0.f);
+
+	const Vector3f chi = b3d % b1r;
+	const Vector3f chi_dot = b3d_dot % b1r + b3d % b1r_dot;
+	const Vector3f chi_ddot =
+		b3d_ddot % b1r
+		+ 2.f * (b3d_dot % b1r_dot)
+		+ b3d % b1r_ddot;
+
+	Vector3f b2d{};
+	Vector3f b2d_dot{};
+	Vector3f b2d_ddot{};
+
+	if (!normalizedVectorDerivatives(chi, chi_dot, chi_ddot,
+					 b2d, b2d_dot, b2d_ddot)) {
+		return false;
+	}
+
+	const Vector3f b1d = b2d % b3d;
+	const Vector3f b1d_dot = b2d_dot % b3d + b2d % b3d_dot;
+	const Vector3f b1d_ddot =
+		b2d_ddot % b3d
+		+ 2.f * (b2d_dot % b3d_dot)
+		+ b2d % b3d_ddot;
+
+	Dcmf R_d{};
+	Matrix3f R_dot{};
+	Matrix3f R_ddot{};
+
+	for (int i = 0; i < 3; i++) {
+		R_d(i, 0) = b1d(i);
+		R_d(i, 1) = b2d(i);
+		R_d(i, 2) = b3d(i);
+
+		R_dot(i, 0) = b1d_dot(i);
+		R_dot(i, 1) = b2d_dot(i);
+		R_dot(i, 2) = b3d_dot(i);
+
+		R_ddot(i, 0) = b1d_ddot(i);
+		R_ddot(i, 1) = b2d_ddot(i);
+		R_ddot(i, 2) = b3d_ddot(i);
+	}
+
+	const Matrix3f omega_hat = R_d.transpose() * R_dot;
+	const Vector3f omega_Rd = veeSkew(omega_hat);
+
+	const Matrix3f omega_cross = skewMatrix(omega_Rd);
+	const Matrix3f alpha_hat =
+		R_d.transpose() * R_ddot
+		- omega_cross * omega_cross;
+	const Vector3f alpha_Rd = veeSkew(alpha_hat);
+
+	if (!omega_Rd.isAllFinite() || !alpha_Rd.isAllFinite()) {
+		return false;
+	}
+
+	Quatf q_d{R_d};
+	q_d.normalize();
+
+	if (!q_d.isAllFinite()) {
+		return false;
+	}
+
+	q_d.copyTo(attitude_reference.q_d);
+	omega_Rd.copyTo(attitude_reference.omega_rd);
+	alpha_Rd.copyTo(attitude_reference.alpha_rd);
+
+	attitude_reference.valid = true;
+	return true;
+}
+
+} // namespace
+
 MulticopterAttitudeControl::MulticopterAttitudeControl(bool vtol) :
 	ModuleParams(nullptr),
 	WorkItem(MODULE_NAME, px4::wq_configurations::nav_and_controllers),
@@ -251,6 +431,7 @@ MulticopterAttitudeControl::Run()
 		/* check for updates in other topics */
 		_manual_control_setpoint_sub.update(&_manual_control_setpoint);
 		_vehicle_control_mode_sub.update(&_vehicle_control_mode);
+		_smc_position_reference_sub.update(&_smc_position_reference);
 
 		if (_vehicle_status_sub.updated()) {
 			vehicle_status_s vehicle_status;
@@ -335,6 +516,10 @@ MulticopterAttitudeControl::Run()
 					_attitude_control.adaptAttitudeSetpoint(delta_q_reset);
 				}
 
+				// The cached analytical reference is expressed in the pre-reset
+				// world frame. Wait for mc_pos_control to publish a new one.
+				_smc_position_reference.valid = false;
+
 				_quat_reset_counter = v_att.quat_reset_counter;
 			}
 
@@ -363,11 +548,49 @@ MulticopterAttitudeControl::Run()
 
 			_vehicle_rates_setpoint_pub.publish(rates_setpoint);
 
+			/*
+			 * Build the analytical attitude reference in parallel with the
+			 * stock attitude-control path. vehicle_rates_setpoint remains
+			 * unchanged at this stage; mc_rate_control will consume the
+			 * supplemental reference when Quaternion SMC is integrated.
+			 */
+			smc_attitude_reference_s smc_attitude_reference{};
+			smc_attitude_reference.q_d[0] = 1.f;
+
+			const bool position_control_active =
+				_vehicle_control_mode.flag_control_position_enabled
+				|| _vehicle_control_mode.flag_control_velocity_enabled
+				|| _vehicle_control_mode.flag_control_altitude_enabled;
+
+			const bool position_reference_fresh =
+				_smc_position_reference.timestamp > 0
+				&& now >= _smc_position_reference.timestamp
+				&& (now - _smc_position_reference.timestamp) < SMC_POSITION_REFERENCE_TIMEOUT;
+
+			smc_attitude_reference.saturated =
+				position_reference_fresh && _smc_position_reference.saturated;
+
+			if (position_control_active
+			    && position_reference_fresh
+			    && _smc_position_reference.valid
+			    && !_smc_position_reference.saturated) {
+
+				generateSmcAttitudeReference(_smc_position_reference, smc_attitude_reference);
+			}
+
+			smc_attitude_reference.timestamp = now;
+			_smc_attitude_reference_pub.publish(smc_attitude_reference);
+
 		} else {
 			_man_roll_input_filter.reset(0.f);
 			_man_pitch_input_filter.reset(0.f);
 			_yaw_setpoint_stabilized = NAN;
 			_stick_yaw.reset(Eulerf(q).psi(), _unaided_heading);
+
+			smc_attitude_reference_s smc_attitude_reference{};
+			smc_attitude_reference.q_d[0] = 1.f;
+			smc_attitude_reference.timestamp = hrt_absolute_time();
+			_smc_attitude_reference_pub.publish(smc_attitude_reference);
 		}
 
 		if (_landed) {
