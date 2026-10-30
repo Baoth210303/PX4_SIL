@@ -226,9 +226,9 @@ private:
 	matrix::Vector3f _gain_vel_d; ///< Velocity control derivative gain
 
 	// Position SMC gains
-	matrix::Vector3f _smc_lambda{1.8f, 1.8f, 1.5f};
-	matrix::Vector3f _smc_k{1.5f, 1.5f, 1.2f};
-	matrix::Vector3f _smc_eta{0.8f, 0.8f, 0.6f};
+	matrix::Vector3f _smc_lambda{1.0f, 1.0f, 1.5f};
+	matrix::Vector3f _smc_k{0.6f, 0.6f, 1.2f};
+	matrix::Vector3f _smc_eta{0.25f, 0.25f, 0.6f};
 	matrix::Vector3f _smc_rho{0.9f, 0.9f, 0.9f};
 
 	// Position-SMC analytical translational reference
