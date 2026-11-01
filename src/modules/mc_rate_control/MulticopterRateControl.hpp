@@ -362,14 +362,14 @@ private:
 	 * wider boundary layer
 	 */
 	matrix::Vector3f _smc_lambda{
-		2.0f,
-		2.0f,
+		2.4f,
+		2.4f,
 		1.5f
 	};
 
 	matrix::Vector3f _smc_k{
-		0.015f,
-		0.015f,
+		0.018f,
+		0.018f,
 		0.010f
 	};
 
