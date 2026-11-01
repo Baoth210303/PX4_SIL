@@ -104,14 +104,6 @@ private:
 		const vehicle_torque_setpoint_s &vehicle_torque_setpoint,
 		float dt);
 
-	/**
-	 * Component-wise boundary-layer saturation:
-	 *
-	 * sat_i = constrain(s_i / phi_i, -1, 1)
-	 */
-	matrix::Vector3f smcSaturation(
-		const matrix::Vector3f &s) const;
-
 	/*
 	 * =========================================================
 	 * Stock PX4 rate controller
@@ -162,7 +154,7 @@ private:
 
 	/*
 	 * =========================================================
-	 * Quaternion SMC subscriptions
+	 * Quaternion PD reference subscriptions
 	 * =========================================================
 	 *
 	 * Current attitude:
@@ -240,7 +232,7 @@ private:
 
 	/*
 	 * =========================================================
-	 * SMC validity state
+	 * Analytical-controller validity state
 	 * =========================================================
 	 */
 
@@ -339,86 +331,31 @@ private:
 
 	/*
 	 * =========================================================
-	 * Quaternion SMC gains
+	 * Quaternion PD gains
 	 * =========================================================
 	 *
-	 * Conservative F450 bring-up values.
+	 * Physical-torque formulation:
 	 *
-	 * Original X500 values:
+	 * tau_QPD = -Kd omega_e - Kp sigma q_e_vec
 	 *
-	 * lambda = [3.5, 3.5, 2.5]
+	 * with
 	 *
-	 * K      = [0.040, 0.028, 0.030]
+	 * q_e     = q_d^{-1} (x) q
+	 * sigma   = sign+(q_we)
+	 * omega_e = omega - omega_d
 	 *
-	 * eta    = [0.0025, 0.0025, 0.0014]
-	 *
-	 * phi    = [0.40, 0.40, 0.30]
-	 *
-	 *
-	 * F450 bring-up:
-	 *
-	 * lower Lambda
-	 * lower reaching gains
-	 * wider boundary layer
+	 * Gains are the values validated in the MATLAB baseline.
 	 */
-	matrix::Vector3f _smc_lambda{
-		2.4f,
-		2.4f,
-		1.5f
+	matrix::Vector3f _qpd_kp{
+		0.14f,
+		0.14f,
+		0.10f
 	};
 
-	matrix::Vector3f _smc_k{
-		0.018f,
-		0.018f,
-		0.010f
-	};
-
-	matrix::Vector3f _smc_eta{
-		0.0010f,
-		0.0010f,
-		0.0006f
-	};
-
-	matrix::Vector3f _smc_boundary{
-		0.50f,
-		0.50f,
-		0.40f
-	};
-
-	/*
-	 * =========================================================
-	 * F450 composite inertia [kg m^2]
-	 * =========================================================
-	 *
-	 * Temporary initial approximation:
-	 *
-	 * J_F450 ≈ 0.5 J_X500
-	 *
-	 *
-	 * Previous X500:
-	 *
-	 * Jx = 0.02383948
-	 *
-	 * Jy = 0.02394241
-	 *
-	 * Jz = 0.04399995
-	 *
-	 *
-	 * Initial F450 estimate:
-	 *
-	 * Jx = 0.01191974
-	 *
-	 * Jy = 0.01197121
-	 *
-	 * Jz = 0.02199998
-	 *
-	 * These should later be replaced by measured or
-	 * identified F450 inertia.
-	 */
-	matrix::Vector3f _smc_inertia{
-		0.01191974f,
-		0.01197121f,
-		0.02199998f
+	matrix::Vector3f _qpd_kd{
+		0.045f,
+		0.045f,
+		0.050f
 	};
 
 	/*
@@ -460,13 +397,11 @@ private:
 	 *
 	 * Retained for the stock PID fallback path.
 	 *
-	 * The analytical QSMC path will not filter:
+	 * The analytical QPD path will not filter omega_d or
+	 * the calculated QPD torque.
 	 *
-	 * omega_d
-	 * alpha_d
-	 *
-	 * and will not require numerical differentiation of
-	 * the desired angular reference.
+	 * No numerical differentiation of the desired angular
+	 * reference is required by the QPD law.
 	 */
 	AlphaFilter<float> _output_lpf_yaw;
 
