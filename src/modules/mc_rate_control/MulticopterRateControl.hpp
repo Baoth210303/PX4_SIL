@@ -445,6 +445,43 @@ private:
 
 	/*
 	 * =========================================================
+	 * Attitude model-based ESO
+	 * =========================================================
+	 *
+	 * Plant:
+	 *
+	 * omega_dot =
+	 *     J^{-1}(tau - omega x J omega)
+	 *     + d_omega
+	 *
+	 * Observer:
+	 *
+	 * omega_hat_dot =
+	 *     f_omega
+	 *     + d_omega_hat
+	 *     + 2*w_o*(omega - omega_hat)
+	 *
+	 * d_omega_hat_dot =
+	 *     w_o^2*(omega - omega_hat)
+	 *
+	 * ESO is updated directly in the existing
+	 * vehicle_angular_velocity callback using the actual PX4 dt.
+	 *
+	 * Previous-iteration physical torque is used by the observer
+	 * to avoid an algebraic loop with the current QSMC torque law.
+	 */
+	float _eso_attitude_bandwidth{15.0f};
+
+	matrix::Vector3f _eso_omega_hat{};
+
+	matrix::Vector3f _eso_domega_hat{};
+
+	matrix::Vector3f _eso_tau_prev{};
+
+	bool _eso_attitude_initialized{false};
+
+	/*
+	 * =========================================================
 	 * Control effort monitoring
 	 * =========================================================
 	 */
