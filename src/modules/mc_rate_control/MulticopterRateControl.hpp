@@ -373,7 +373,7 @@ private:
 		0.010f
 	};
 
-	matrix::Vector3f _smc_eta{0.025f, 0.025f, 0.018f};
+	matrix::Vector3f _smc_eta{0.015f, 0.015f, 0.010f};
 
 	matrix::Vector3f _smc_boundary{
 		0.50f,
