@@ -34,6 +34,7 @@
 #include "MulticopterRateControl.hpp"
 
 #include <float.h>
+#include <cstring>
 
 #include <drivers/drv_hrt.h>
 #include <circuit_breaker/circuit_breaker.h>
@@ -102,16 +103,6 @@ MulticopterRateControl::init()
 void
 MulticopterRateControl::parameters_updated()
 {
-	/*
-	 * =========================================================
-	 * Stock PX4 rate controller parameters
-	 * =========================================================
-	 *
-	 * The stock controller is intentionally retained as a
-	 * fallback whenever the analytical QSMC trajectory cannot
-	 * safely be used.
-	 */
-
 	const Vector3f rate_k{
 		_param_mc_rollrate_k.get(),
 		_param_mc_pitchrate_k.get(),
@@ -152,9 +143,6 @@ MulticopterRateControl::parameters_updated()
 			_param_mc_yawrate_ff.get())
 	);
 
-	/*
-	 * Manual ACRO rate limits.
-	 */
 	_acro_rate_max =
 		Vector3f(
 			radians(_param_mc_acro_r_max.get()),
@@ -162,11 +150,6 @@ MulticopterRateControl::parameters_updated()
 			radians(_param_mc_acro_y_max.get())
 		);
 
-	/*
-	 * Stock PX4 yaw torque LPF.
-	 *
-	 * Used only by the PID fallback path.
-	 */
 	_output_lpf_yaw.setCutoffFreq(
 		_param_mc_yaw_tq_cutoff.get()
 	);
@@ -213,12 +196,6 @@ MulticopterRateControl::Run()
 
 	perf_begin(_loop_perf);
 
-	/*
-	 * =========================================================
-	 * Parameter updates
-	 * =========================================================
-	 */
-
 	if (_parameter_update_sub.updated()) {
 
 		parameter_update_s param_update{};
@@ -232,12 +209,6 @@ MulticopterRateControl::Run()
 		parameters_updated();
 	}
 
-	/*
-	 * =========================================================
-	 * Run on fresh angular velocity / gyro samples
-	 * =========================================================
-	 */
-
 	vehicle_angular_velocity_s angular_velocity{};
 
 	if (_vehicle_angular_velocity_sub.update(
@@ -246,10 +217,6 @@ MulticopterRateControl::Run()
 		const hrt_abstime now =
 			angular_velocity.timestamp_sample;
 
-		/*
-		 * Guard against too small (< 0.125 ms) and
-		 * too large (> 20 ms) rate-loop dt.
-		 */
 		const float dt =
 			math::constrain(
 				((now - _last_run) * 1e-6f),
@@ -693,10 +660,12 @@ MulticopterRateControl::Run()
 					 * d_omega_hat_dot =
 					 *     L2(omega - omega_hat)
 					 *
-					 * L1 = 2*w_o
-					 * L2 = w_o^2
+					 * Per-axis ESO bandwidth:
 					 *
-					 * w_o = 15 rad/s
+					 * w_o = [10, 10, 10] rad/s
+					 *
+					 * L1 = 2*w_o
+					 * L2 = w_o .* w_o
 					 */
 					if (!_eso_attitude_initialized) {
 
@@ -736,23 +705,26 @@ MulticopterRateControl::Run()
 							rates
 							- _eso_omega_hat;
 
-						const float eso_l1 =
+						const Vector3f eso_l1 =
 							2.f
 							* _eso_attitude_bandwidth;
 
-						const float eso_l2 =
-							_eso_attitude_bandwidth
-							* _eso_attitude_bandwidth;
+						const Vector3f eso_l2 =
+							_eso_attitude_bandwidth.emult(
+								_eso_attitude_bandwidth
+							);
 
 						const Vector3f omega_hat_dot =
 							f_omega_prev
 							+ _eso_domega_hat
-							+ eso_l1
-							* eso_error;
+							+ eso_l1.emult(
+								eso_error
+							);
 
 						const Vector3f domega_hat_dot =
-							eso_l2
-							* eso_error;
+							eso_l2.emult(
+								eso_error
+							);
 
 						_eso_omega_hat +=
 							omega_hat_dot
@@ -784,23 +756,63 @@ MulticopterRateControl::Run()
 
 					/*
 					 * =================================================
-					 * Quaternion SMC + ESO torque law
+					 * ESO diagnostic logging
 					 * =================================================
 					 *
-					 * tau =
+					 * Publish at 100 Hz through the existing PX4
+					 * debug_array topic.
 					 *
-					 * J(
-					 *     omega_dot_d
-					 *     - Lambda e_q_dot
-					 *     - d_omega_hat
-					 * )
-					 *
-					 * + omega x J omega
-					 *
-					 * - K s
-					 *
-					 * - eta sat(s)
+					 * data[0..2] = omega_hat [rad/s]
+					 * data[3..5] = d_omega_hat [rad/s^2]
+					 * data[6..8] = tau_ESO = -J*d_omega_hat [N m]
 					 */
+					if (_eso_attitude_initialized
+					    && (_last_eso_debug_publish == 0
+						|| (time_now - _last_eso_debug_publish)
+						   >= ESO_DEBUG_INTERVAL)) {
+
+						debug_array_s eso_debug{};
+
+						eso_debug.timestamp =
+							time_now;
+
+						eso_debug.id = 1;
+
+						std::strncpy(
+							eso_debug.name,
+							"eso_att",
+							sizeof(eso_debug.name)
+						);
+
+						eso_debug.name[
+							sizeof(eso_debug.name) - 1
+						] = '\0';
+
+						const Vector3f tau_eso =
+    						-1.f * _smc_inertia.emult(
+        					_eso_compensation_gain.emult(_eso_domega_hat)
+    );
+
+						for (int i = 0; i < 3; i++) {
+
+							eso_debug.data[i] =
+								_eso_omega_hat(i);
+
+							eso_debug.data[i + 3] =
+								_eso_domega_hat(i);
+
+							eso_debug.data[i + 6] =
+								tau_eso(i);
+						}
+
+						_eso_debug_pub.publish(
+							eso_debug
+						);
+
+						_last_eso_debug_publish =
+							time_now;
+					}
+
 					const Vector3f tau_phys =
 						_smc_inertia.emult(
 
@@ -809,8 +821,7 @@ MulticopterRateControl::Run()
 							_smc_lambda.emult(
 								e_q_dot
 							)
-							-
-							_eso_domega_hat
+							- _eso_compensation_gain.emult(_eso_domega_hat)
 						)
 
 						+ omega_cross_J_omega
@@ -868,9 +879,6 @@ MulticopterRateControl::Run()
 
 			if (!use_smc) {
 
-				/*
-				 * Reset ESO whenever QSMC is inactive.
-				 */
 				_eso_attitude_initialized =
 					false;
 
@@ -882,6 +890,9 @@ MulticopterRateControl::Run()
 
 				_eso_tau_prev =
 					Vector3f{};
+
+				_last_eso_debug_publish =
+					0;
 
 				torque_setpoint =
 					_rate_control.update(
@@ -998,9 +1009,6 @@ MulticopterRateControl::Run()
 				}
 			}
 
-			/*
-			 * Re-apply QSMC safety clamp.
-			 */
 			if (use_smc) {
 
 				vehicle_torque_setpoint.xyz[0] =
@@ -1024,10 +1032,6 @@ MulticopterRateControl::Run()
 						SMC_OUTPUT_LIMIT_YAW
 					);
 
-				/*
-				 * Store equivalent physical torque for the
-				 * ESO model input on the next rate iteration.
-				 */
 				for (int i = 0;
 				     i < 3;
 				     i++) {

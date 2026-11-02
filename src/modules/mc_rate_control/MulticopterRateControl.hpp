@@ -52,6 +52,7 @@
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/battery_status.h>
 #include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/debug_array.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/rate_ctrl_status.h>
@@ -228,6 +229,33 @@ private:
 
 	/*
 	 * =========================================================
+	 * ESO diagnostic publication
+	 * =========================================================
+	 *
+	 * debug_array.data:
+	 *
+	 * data[0] = omega_hat_x
+	 * data[1] = omega_hat_y
+	 * data[2] = omega_hat_z
+	 *
+	 * data[3] = d_omega_hat_x
+	 * data[4] = d_omega_hat_y
+	 * data[5] = d_omega_hat_z
+	 *
+	 * data[6] = tau_ESO_x
+	 * data[7] = tau_ESO_y
+	 * data[8] = tau_ESO_z
+	 *
+	 * where:
+	 *
+	 * tau_ESO = -J * d_omega_hat
+	 */
+	uORB::Publication<debug_array_s> _eso_debug_pub{
+		ORB_ID(debug_array)
+	};
+
+	/*
+	 * =========================================================
 	 * PX4 state
 	 * =========================================================
 	 */
@@ -261,6 +289,19 @@ private:
 	hrt_abstime _last_smc_reference_update{0};
 
 	hrt_abstime _last_attitude_update{0};
+
+	/*
+	 * Last ESO diagnostic publication timestamp.
+	 */
+	hrt_abstime _last_eso_debug_publish{0};
+
+	/*
+	 * ESO diagnostic publication interval:
+	 *
+	 * 10 ms = 100 Hz
+	 */
+	static constexpr hrt_abstime
+	ESO_DEBUG_INTERVAL = 10_ms;
 
 	static constexpr hrt_abstime
 	SMC_REFERENCE_TIMEOUT = 100_ms;
@@ -374,9 +415,9 @@ private:
 	};
 
 	matrix::Vector3f _smc_eta{
-		0.0010f,
-		0.0010f,
-		0.0006f
+		0.025f,
+		0.025f,
+		0.018f
 	};
 
 	matrix::Vector3f _smc_boundary{
@@ -459,10 +500,18 @@ private:
 	 * omega_hat_dot =
 	 *     f_omega
 	 *     + d_omega_hat
-	 *     + 2*w_o*(omega - omega_hat)
+	 *     + L1 .* (omega - omega_hat)
 	 *
 	 * d_omega_hat_dot =
-	 *     w_o^2*(omega - omega_hat)
+	 *     L2 .* (omega - omega_hat)
+	 *
+	 * Per-axis observer bandwidth:
+	 *
+	 * w_o = [w_ox, w_oy, w_oz]^T
+	 *
+	 * L1 = 2*w_o
+	 *
+	 * L2 = w_o .* w_o
 	 *
 	 * ESO is updated directly in the existing
 	 * vehicle_angular_velocity callback using the actual PX4 dt.
@@ -470,7 +519,17 @@ private:
 	 * Previous-iteration physical torque is used by the observer
 	 * to avoid an algebraic loop with the current QSMC torque law.
 	 */
-	float _eso_attitude_bandwidth{15.0f};
+	matrix::Vector3f _eso_attitude_bandwidth{
+		300.0f,
+		300.0f,
+		300.0f
+	};
+
+	matrix::Vector3f _eso_compensation_gain{
+    	0.25f,
+    	0.30f,
+    	0.25f
+	};
 
 	matrix::Vector3f _eso_omega_hat{};
 
