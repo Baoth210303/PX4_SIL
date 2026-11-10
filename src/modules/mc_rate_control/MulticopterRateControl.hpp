@@ -520,9 +520,9 @@ private:
 	 * to avoid an algebraic loop with the current QSMC torque law.
 	 */
 	matrix::Vector3f _eso_attitude_bandwidth{
-		300.0f,
-		300.0f,
-		300.0f
+		15.0f,
+		15.0f,
+		15.0f
 	};
 
 	matrix::Vector3f _eso_compensation_gain{
