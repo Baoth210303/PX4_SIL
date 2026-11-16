@@ -203,6 +203,70 @@ void PositionControl::_velocityControl(const float dt)
 	_vel_int += vel_error.emult(_gain_vel_i) * dt;
 }
 
+void PositionControl::_updatePositionLESO(const float dt)
+{
+	// Do not adapt during ground contact, takeoff ramp, or invalid state.
+	const bool ready = _eso_pos_enabled && _vel.isAllFinite()
+		&& PX4_ISFINITE(dt) && dt > 0.001f && dt < 0.08f
+		&& PX4_ISFINITE(_hover_thrust) && _hover_thrust > 0.05f;
+
+	if (!ready) {
+		_eso_pos_initialized = false;
+		_eso_dacc_hat.zero();
+		_eso_dacc_limited.zero();
+		_eso_comp_1.zero();
+		_eso_comp_2.zero();
+		return;
+	}
+
+	if (!_eso_pos_initialized) {
+		_eso_vel_hat = _vel;
+		_eso_dacc_hat.zero();
+		_eso_dacc_limited.zero();
+		_eso_comp_1.zero();
+		_eso_comp_2.zero();
+		_eso_prev_thrust = _thr_sp.isAllFinite() ? _thr_sp : Vector3f{};
+		_eso_pos_initialized = true;
+		return;
+	}
+
+	// PX4 NED convention: gravity is +g in down direction, and the
+	// normalized thrust setpoint is negative in hover. This converts
+	// a PREVIOUS-CYCLE thrust command to a nominal acceleration.
+	const Vector3f gravity_ned(0.f, 0.f, CONSTANTS_ONE_G);
+	const Vector3f acc_nominal = gravity_ned
+		+ _eso_prev_thrust * (CONSTANTS_ONE_G / _hover_thrust);
+	const Vector3f error = _vel - _eso_vel_hat;
+	const float wo = ESO_POS_BANDWIDTH;
+	const Vector3f vel_hat_dot = acc_nominal + _eso_dacc_hat + 2.f * wo * error;
+	const Vector3f dacc_hat_dot = (wo * wo) * error;
+
+	_eso_vel_hat += dt * vel_hat_dot;
+	_eso_dacc_hat += dt * dacc_hat_dot;
+
+	if (!_eso_vel_hat.isAllFinite() || !_eso_dacc_hat.isAllFinite()) {
+		_eso_pos_initialized = false;
+		_eso_vel_hat = _vel;
+		_eso_dacc_hat.zero();
+		_eso_dacc_limited.zero();
+		_eso_comp_1.zero();
+		_eso_comp_2.zero();
+		return;
+	}
+
+	// Limit the compensation source, but preserve a finite observer state.
+	_eso_dacc_limited = _eso_dacc_hat;
+	for (int i = 0; i < 3; ++i) {
+		_eso_dacc_limited(i) = math::constrain(_eso_dacc_limited(i), -ESO_POS_MAX_DACC, ESO_POS_MAX_DACC);
+	}
+
+	// Cascaded low-pass: both first and second time derivatives are
+	// available analytically for the downstream kappa reference.
+	const float wf = ESO_POS_FILTER_BW;
+	_eso_comp_2 += dt * wf * (_eso_dacc_limited - _eso_comp_2);
+	_eso_comp_1 += dt * wf * (_eso_comp_2 - _eso_comp_1);
+}
+
 void PositionControl::_smcPositionVelocityControl(const float dt)
 {
 	/*
@@ -217,6 +281,10 @@ void PositionControl::_smcPositionVelocityControl(const float dt)
 	Vector3f e{};
 	Vector3f e_dot{};
 	Vector3f acc_ff = _acc_sp;
+
+	// Update the observer BEFORE calculating the current QSMC command.
+	// It uses the last cycle's commanded (not achieved) thrust.
+	_updatePositionLESO(dt);
 
 	for (int i = 0; i < 3; i++) {
 		const bool has_pos_sp = PX4_ISFINITE(_pos_sp(i));
@@ -375,23 +443,38 @@ void PositionControl::_smcPositionVelocityControl(const float dt)
 	/*
 	 * Position-SMC acceleration command and its analytical derivatives.
 	 */
-	const Vector3f acc_cmd =
+	// Preserve the existing QSMC acceleration law exactly.
+	const Vector3f acc_cmd_qsmc =
 		acc_ff
 		- e_dot.emult(_smc_lambda)
 		- sliding_surface.emult(_smc_k)
 		- switching_term.emult(_smc_eta);
 
-	const Vector3f acc_cmd_dot =
+	const Vector3f acc_cmd_dot_qsmc =
 		jerk_des
 		- e_acc.emult(_smc_lambda)
 		- sliding_surface_dot.emult(_smc_k)
 		- switching_term_dot.emult(_smc_eta);
 
-	const Vector3f acc_cmd_ddot =
+	const Vector3f acc_cmd_ddot_qsmc =
 		snap_des
 		- e_jerk.emult(_smc_lambda)
 		- sliding_surface_ddot.emult(_smc_k)
 		- switching_term_ddot.emult(_smc_eta);
+
+	// LESO provides a total acceleration disturbance estimate [m/s^2]
+	// in NED. The double-filter derivatives keep kappa_dot and
+	// kappa_ddot consistent with the compensated thrust direction.
+	const Vector3f c = _eso_pos_initialized ? _eso_comp_1 : Vector3f{};
+	const Vector3f cdot = _eso_pos_initialized
+		? ESO_POS_FILTER_BW * (_eso_comp_2 - _eso_comp_1) : Vector3f{};
+	const Vector3f cddot = _eso_pos_initialized
+		? (ESO_POS_FILTER_BW * ESO_POS_FILTER_BW)
+		  * (_eso_dacc_limited - 2.f * _eso_comp_2 + _eso_comp_1) : Vector3f{};
+
+	const Vector3f acc_cmd = acc_cmd_qsmc - ESO_POS_COMP_GAIN * c;
+	const Vector3f acc_cmd_dot = acc_cmd_dot_qsmc - ESO_POS_COMP_GAIN * cdot;
+	const Vector3f acc_cmd_ddot = acc_cmd_ddot_qsmc - ESO_POS_COMP_GAIN * cddot;
 
 	_acc_sp = acc_cmd;
 
@@ -541,6 +624,9 @@ void PositionControl::_smcPositionVelocityControl(const float dt)
 		_kappa_dot.zero();
 		_kappa_ddot.zero();
 	}
+
+	// Save the FINAL, limited normalized NED thrust for the next update.
+	if (_thr_sp.isAllFinite()) { _eso_prev_thrust = _thr_sp; }
 }
 
 void PositionControl::_accelerationControl()

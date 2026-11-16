@@ -52,6 +52,7 @@
 #include <uORB/topics/actuator_controls_status.h>
 #include <uORB/topics/battery_status.h>
 #include <uORB/topics/control_allocator_status.h>
+#include <uORB/topics/debug_array.h>
 #include <uORB/topics/manual_control_setpoint.h>
 #include <uORB/topics/parameter_update.h>
 #include <uORB/topics/rate_ctrl_status.h>
@@ -111,6 +112,11 @@ private:
 	 */
 	matrix::Vector3f smcSaturation(
 		const matrix::Vector3f &s) const;
+
+	// Body-frame rate/disturbance LESO. Independent of the QSMC law.
+	void resetAttitudeLESO(const matrix::Vector3f &omega);
+	void updateAttitudeLESO(const matrix::Vector3f &omega, float dt);
+	matrix::Vector3f attitudeLESOCompensation() const;
 
 	/*
 	 * =========================================================
@@ -225,6 +231,10 @@ private:
 
 	uORB::Publication<vehicle_torque_setpoint_s>
 	_vehicle_torque_setpoint_pub;
+
+	// [0:2] omega_hat; [3:5] angular acceleration disturbance;
+	// [6:8] additive torque compensation [N*m].
+	uORB::Publication<debug_array_s> _eso_att_debug_pub{ORB_ID(debug_array)};
 
 	/*
 	 * =========================================================
@@ -438,6 +448,32 @@ private:
 		0.40f,
 		0.20f
 	};
+
+	/*
+	 * Linear Attitude ESO for the body-frame rigid-body model:
+	 *   omega_dot = J^-1(tau_cmd_prev - omega x J*omega) + d_omega
+	 *   omega_hat_dot = nominal + d_hat + 2*wo*(omega - omega_hat)
+	 *   d_hat_dot = wo^2*(omega - omega_hat)
+	 *
+	 * Input tau_cmd_prev is inferred from FINAL normalized setpoint;
+	 * it is NOT measured achieved motor torque. Lumped d_omega thus
+	 * includes torque-model mismatch, actuator lag and disturbances.
+	 * The numbers below are conservative STARTING values, not paper gains.
+	 */
+	static constexpr bool ESO_ATT_ENABLED = true;
+	matrix::Vector3f _eso_att_bandwidth{25.f, 25.f, 18.f}; // rad/s
+	matrix::Vector3f _eso_att_comp_gain{0.60f, 0.60f, 0.60f};
+	matrix::Vector3f _eso_att_comp_limit{0.020f, 0.020f, 0.012f}; // N*m
+	static constexpr float ESO_ATT_FILTER_BW = 8.f; // rad/s
+	static constexpr float ESO_ATT_WARMUP_S = 0.5f;
+	static constexpr float ESO_ATT_RAMP_S = 0.75f;
+	bool _eso_att_initialized{false};
+	float _eso_att_elapsed{0.f};
+	matrix::Vector3f _eso_att_omega_hat{}; // rad/s, current body frame
+	matrix::Vector3f _eso_att_domega_hat{}; // rad/s^2, lumped acceleration
+	matrix::Vector3f _eso_att_domega_filtered{}; // rad/s^2
+	matrix::Vector3f _eso_att_prev_tau_phys{}; // previous command, N*m
+	hrt_abstime _eso_att_last_debug{0};
 
 	/*
 	 * =========================================================

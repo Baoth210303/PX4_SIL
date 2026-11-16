@@ -34,6 +34,7 @@
 #include "MulticopterRateControl.hpp"
 
 #include <float.h>
+#include <cstring>
 
 #include <drivers/drv_hrt.h>
 #include <circuit_breaker/circuit_breaker.h>
@@ -196,6 +197,91 @@ MulticopterRateControl::smcSaturation(
 	}
 
 	return sat_s;
+}
+
+
+void
+MulticopterRateControl::resetAttitudeLESO(const Vector3f &omega)
+{
+	_eso_att_initialized = false;
+	_eso_att_elapsed = 0.f;
+	_eso_att_omega_hat = omega.isAllFinite() ? omega : Vector3f{};
+	_eso_att_domega_hat.zero();
+	_eso_att_domega_filtered.zero();
+	_eso_att_prev_tau_phys.zero();
+	_eso_att_last_debug = 0;
+}
+
+
+void
+MulticopterRateControl::updateAttitudeLESO(const Vector3f &omega, float dt)
+{
+	if (!ESO_ATT_ENABLED || !omega.isAllFinite() || !PX4_ISFINITE(dt)
+	    || dt < 0.0001f || dt > 0.02f || !_smc_inertia.isAllFinite()) {
+		resetAttitudeLESO(omega);
+		return;
+	}
+
+	if (!_eso_att_initialized) {
+		resetAttitudeLESO(omega);
+		_eso_att_initialized = true;
+		return;
+	}
+
+	// All quantities are in current body frame (FRD). The previous
+	// final command is mapped to a NOMINAL torque; no achieved torque
+	// measurement is available from vehicle_torque_setpoint.
+	const Vector3f gyroscopic = omega % _smc_inertia.emult(omega);
+	Vector3f nominal_accel{};
+
+	for (int i = 0; i < 3; ++i) {
+		const float Ji = math::max(_smc_inertia(i), 1e-6f);
+		nominal_accel(i) = (_eso_att_prev_tau_phys(i) - gyroscopic(i)) / Ji;
+	}
+
+	const Vector3f error = omega - _eso_att_omega_hat;
+	const Vector3f l1 = 2.f * _eso_att_bandwidth;
+	const Vector3f l2 = _eso_att_bandwidth.emult(_eso_att_bandwidth);
+	_eso_att_omega_hat += dt * (nominal_accel + _eso_att_domega_hat + l1.emult(error));
+	_eso_att_domega_hat += dt * l2.emult(error);
+
+	if (!_eso_att_omega_hat.isAllFinite() || !_eso_att_domega_hat.isAllFinite()) {
+		resetAttitudeLESO(omega);
+		return;
+	}
+
+	// Limit the signal used for compensation, without clipping the
+	// observer's internal state. Filtering reduces gyro-noise injection.
+	Vector3f limited = _eso_att_domega_hat;
+	for (int i = 0; i < 3; ++i) {
+		const float Ji = math::max(_smc_inertia(i), 1e-6f);
+		const float dmax = 2.f * _eso_att_comp_limit(i) / Ji;
+		limited(i) = math::constrain(limited(i), -dmax, dmax);
+	}
+
+	const float a = math::constrain(dt * ESO_ATT_FILTER_BW, 0.f, 1.f);
+	_eso_att_domega_filtered += a * (limited - _eso_att_domega_filtered);
+	_eso_att_elapsed += dt;
+}
+
+
+Vector3f
+MulticopterRateControl::attitudeLESOCompensation() const
+{
+	if (!_eso_att_initialized) {
+		return Vector3f{};
+	}
+
+	const float ramp = math::constrain(
+		(_eso_att_elapsed - ESO_ATT_WARMUP_S) / ESO_ATT_RAMP_S,
+		0.f, 1.f);
+	Vector3f tau_comp = -ramp * _smc_inertia.emult(
+		_eso_att_comp_gain.emult(_eso_att_domega_filtered));
+	for (int i = 0; i < 3; ++i) {
+		tau_comp(i) = math::constrain(tau_comp(i),
+			-_eso_att_comp_limit(i), _eso_att_comp_limit(i));
+	}
+	return tau_comp.isAllFinite() ? tau_comp : Vector3f{};
 }
 
 
@@ -875,6 +961,13 @@ MulticopterRateControl::Run()
 						rates
 						% J_omega;
 
+					// Only adapt when airborne and quaternion QSMC is active.
+					if (!_landed && !_maybe_landed) {
+						updateAttitudeLESO(rates, dt);
+					} else {
+						resetAttitudeLESO(rates);
+					}
+
 					/*
 					 * -----------------------------------------
 					 * Quaternion SMC torque law
@@ -894,7 +987,7 @@ MulticopterRateControl::Run()
 					 * - eta sat(s)
 					 */
 
-					const Vector3f tau_phys =
+					const Vector3f tau_qsmc =
 						_smc_inertia.emult(
 
 							omega_dot_d
@@ -926,6 +1019,9 @@ MulticopterRateControl::Run()
 					 * followed by the conservative F450
 					 * bring-up output limit.
 					 */
+
+					// Keep original QSMC formula untouched; add LESO torque.
+					const Vector3f tau_phys = tau_qsmc + attitudeLESOCompensation();
 
 					if (tau_phys.isAllFinite()) {
 
@@ -980,6 +1076,7 @@ MulticopterRateControl::Run()
 			 */
 
 			if (!use_smc) {
+				resetAttitudeLESO(rates);
 
 				torque_setpoint =
 					_rate_control.update(
@@ -1169,6 +1266,36 @@ MulticopterRateControl::Run()
 			}
 
 			/*
+			 * Store FINAL normalized command, after battery scaling and
+			 * the F450 safety clamps. Map it through QSMC's own nominal
+			 * normalization to get next-cycle observer input in N*m.
+			 * This is NOT actual achieved motor torque.
+			 */
+			if (use_smc && _eso_att_initialized) {
+				for (int i = 0; i < 3; ++i) {
+					_eso_att_prev_tau_phys(i) = vehicle_torque_setpoint.xyz[i]
+						* _smc_torque_max(i);
+				}
+
+				if (_eso_att_last_debug == 0
+				    || time_now - _eso_att_last_debug >= 10_ms) {
+					debug_array_s dbg{};
+					dbg.timestamp = time_now;
+					dbg.id = 1;
+					std::strncpy(dbg.name, "eso_att", sizeof(dbg.name));
+					dbg.name[sizeof(dbg.name) - 1] = '\0';
+					const Vector3f tau_comp = attitudeLESOCompensation();
+					for (int i = 0; i < 3; ++i) {
+						dbg.data[i] = _eso_att_omega_hat(i);
+						dbg.data[i + 3] = _eso_att_domega_hat(i);
+						dbg.data[i + 6] = tau_comp(i);
+					}
+					_eso_att_debug_pub.publish(dbg);
+					_eso_att_last_debug = time_now;
+				}
+			}
+
+			/*
 			 * =================================================
 			 * Publish stock PX4 actuator setpoint interfaces
 			 * =================================================
@@ -1198,6 +1325,8 @@ MulticopterRateControl::Run()
 				vehicle_torque_setpoint,
 				dt
 			);
+		} else {
+			resetAttitudeLESO(rates);
 		}
 	}
 

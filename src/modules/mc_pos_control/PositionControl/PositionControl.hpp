@@ -157,6 +157,18 @@ public:
 	 */
 	bool update(const float dt);
 
+	// Translational velocity-based LESO (NED). Keep QSMC unchanged.
+	void setPositionLESOActive(bool active)
+	{
+		_eso_pos_enabled = active;
+		if (!active) { _eso_pos_initialized = false; }
+	}
+	bool positionLESOInitialized() const { return _eso_pos_initialized; }
+	const matrix::Vector3f &positionLESOVelocityHat() const { return _eso_vel_hat; }
+	const matrix::Vector3f &positionLESODisturbance() const { return _eso_dacc_hat; }
+	const matrix::Vector3f &positionLESOCompensation() const { return _eso_comp_1; }
+
+
 	/**
 	 * Set the integral term in xy to 0.
 	 * @see _vel_int
@@ -217,6 +229,7 @@ private:
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
 	void _smcPositionVelocityControl(const float dt); ///< Full SMC translational control
+	void _updatePositionLESO(const float dt); ///< Trans. velocity/disturbance observer
 	void _accelerationControl(); ///< Acceleration setpoint processing
 
 	// Gains
@@ -247,6 +260,23 @@ private:
 	bool _smc_acc_ff_history_initialized{false};
 	bool _smc_jerk_des_history_initialized{false};
 	bool _smc_acc_meas_history_initialized{false};
+
+	// Translational LESO: v_dot = g*e3 + (g/hover)*thrust_NED + d_acc.
+	// The thrust_NED input is last cycle's commanded NED thrust vector,
+	// not achieved thrust: d_acc is a TOTAL acceleration disturbance.
+	bool _eso_pos_enabled{false};
+	bool _eso_pos_initialized{false};
+	matrix::Vector3f _eso_vel_hat{};       // m/s, NED
+	matrix::Vector3f _eso_dacc_hat{};      // m/s^2, NED
+	matrix::Vector3f _eso_dacc_limited{};  // clipped estimate used for compensation
+	matrix::Vector3f _eso_prev_thrust{};   // normalized thrust vector, NED
+	matrix::Vector3f _eso_comp_1{};        // first low-pass stage
+	matrix::Vector3f _eso_comp_2{};        // second low-pass stage
+	static constexpr float ESO_POS_BANDWIDTH = 3.5f; // rad/s, starting value
+	static constexpr float ESO_POS_FILTER_BW = 4.0f; // rad/s, starting value
+	static constexpr float ESO_POS_COMP_GAIN = 0.30f; // starting value
+	static constexpr float ESO_POS_MAX_DACC = 4.0f; // m/s^2, safety cap
+
 
 	// Limits
 	float _lim_vel_horizontal{}; ///< Horizontal velocity limit with feed forward and position control

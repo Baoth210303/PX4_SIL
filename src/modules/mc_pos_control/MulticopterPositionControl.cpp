@@ -34,6 +34,7 @@
 #include "MulticopterPositionControl.hpp"
 
 #include <float.h>
+#include <cstring>
 #include <lib/mathlib/mathlib.h>
 #include <lib/matrix/matrix/math.hpp>
 #include <px4_platform_common/events.h>
@@ -414,6 +415,9 @@ void MulticopterPositionControl::Run()
 		}
 
 		_vehicle_land_detected_sub.update(&_vehicle_land_detected);
+		if (!_vehicle_control_mode.flag_multicopter_position_control_enabled) {
+			_control.setPositionLESOActive(false);
+		}
 
 		if (_param_mpc_use_hte.get()) {
 			hover_thrust_estimate_s hte;
@@ -500,6 +504,9 @@ void MulticopterPositionControl::Run()
 			const bool not_taken_off             = (_takeoff.getTakeoffState() < TakeoffState::rampup);
 			const bool flying                    = (_takeoff.getTakeoffState() >= TakeoffState::flight);
 			const bool flying_but_ground_contact = (flying && _vehicle_land_detected.ground_contact);
+			// Never adapt/bump the LESO during landing or takeoff ramp.
+			_control.setPositionLESOActive(flying && !_vehicle_land_detected.landed
+						   && !_vehicle_land_detected.ground_contact);
 
 			if (!flying) {
 				_control.setHoverThrust(_param_mpc_thr_hover.get());
@@ -598,7 +605,26 @@ void MulticopterPositionControl::Run()
 				}
 			}
 
-			// Publish internal position control setpoints
+			// Position LESO diagnostic, at most 50 Hz:
+		// data[0:2] v_hat [m/s], [3:5] d_acc_hat [m/s^2],
+		// [6:8] filtered compensation source [m/s^2], NED.
+		if (_control.positionLESOInitialized()
+		    && (_eso_pos_last_debug == 0 || now - _eso_pos_last_debug >= 20_ms)) {
+			debug_array_s dbg{};
+			dbg.timestamp = now;
+			dbg.id = 2;
+			std::strncpy(dbg.name, "eso_pos", sizeof(dbg.name));
+			dbg.name[sizeof(dbg.name) - 1] = '\0';
+			for (int i = 0; i < 3; ++i) {
+				dbg.data[i] = _control.positionLESOVelocityHat()(i);
+				dbg.data[i + 3] = _control.positionLESODisturbance()(i);
+				dbg.data[i + 6] = _control.positionLESOCompensation()(i);
+			}
+			_eso_pos_debug_pub.publish(dbg);
+			_eso_pos_last_debug = now;
+		}
+
+		// Publish internal position control setpoints
 			// on top of the input/feed-forward setpoints these containt the PID corrections
 			// This message is used by other modules (such as Landdetector) to determine vehicle intention.
 			vehicle_local_position_setpoint_s local_pos_sp{};
