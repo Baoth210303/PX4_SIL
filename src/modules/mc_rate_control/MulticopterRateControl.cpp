@@ -108,7 +108,7 @@ MulticopterRateControl::parameters_updated()
 	 * =========================================================
 	 *
 	 * The stock controller is intentionally retained as a
-	 * fallback whenever the analytical QSMC trajectory cannot
+	 * fallback whenever the analytical QPD trajectory cannot
 	 * safely be used.
 	 */
 
@@ -170,32 +170,6 @@ MulticopterRateControl::parameters_updated()
 	_output_lpf_yaw.setCutoffFreq(
 		_param_mc_yaw_tq_cutoff.get()
 	);
-}
-
-
-Vector3f
-MulticopterRateControl::smcSaturation(
-	const Vector3f &s) const
-{
-	Vector3f sat_s{};
-
-	for (int i = 0; i < 3; i++) {
-
-		const float boundary =
-			math::max(
-				_smc_boundary(i),
-				FLT_EPSILON
-			);
-
-		sat_s(i) =
-			math::constrain(
-				s(i) / boundary,
-				-1.f,
-				1.f
-			);
-	}
-
-	return sat_s;
 }
 
 
@@ -312,7 +286,7 @@ MulticopterRateControl::Run()
 		 *
 		 * R = R(q)
 		 *
-		 * The QSMC calculations require current attitude and
+		 * The QPD calculations require current attitude and
 		 * current body angular velocity in the same rate-loop
 		 * iteration.
 		 */
@@ -464,7 +438,7 @@ MulticopterRateControl::Run()
 		 * 1. ACRO/manual mode requires it.
 		 *
 		 * 2. vehicle_rates_setpoint remains the safe fallback
-		 *    reference when QSMC is unavailable.
+		 *    reference when QPD is unavailable.
 		 *
 		 * 3. thrust continues to come through the standard
 		 *    PX4 attitude/rate interface.
@@ -602,7 +576,7 @@ MulticopterRateControl::Run()
 			 * =================================================
 			 *
 			 * Preserve the stock feedback path for the PID
-			 * controller. QSMC itself does not currently use an
+			 * controller. QPD itself does not currently use an
 			 * integrator or this anti-windup information.
 			 */
 
@@ -651,10 +625,10 @@ MulticopterRateControl::Run()
 
 			/*
 			 * =================================================
-			 * Decide whether Quaternion SMC can be used
+			 * Decide whether Quaternion PD can be used
 			 * =================================================
 			 *
-			 * QSMC requires:
+			 * QPD requires:
 			 *
 			 * - armed vehicle
 			 * - attitude control active
@@ -685,7 +659,7 @@ MulticopterRateControl::Run()
 
 			/*
 			 * =================================================
-			 * Quaternion Sliding Mode Controller
+			 * Quaternion PD Controller
 			 * =================================================
 			 */
 
@@ -693,32 +667,19 @@ MulticopterRateControl::Run()
 
 				/*
 				 * ---------------------------------------------
-				 * Desired angular trajectory transformation
+				 * Desired angular-rate transformation
 				 * ---------------------------------------------
 				 *
-				 * Position/attitude reference supplies:
-				 *
-				 * omega_Rd
-				 * alpha_Rd
-				 *
-				 * in desired body frame B_d.
-				 *
-				 * Current gyro omega is expressed in current
-				 * body frame B.
-				 *
-				 * Therefore:
+				 * Position/attitude reference supplies omega_Rd
+				 * in desired body frame B_d, while the gyro
+				 * measurement omega is expressed in current body
+				 * frame B. Therefore:
 				 *
 				 * Q = R^T R_d
 				 *
-				 * omega_d =
+				 * omega_d = Q omega_Rd
 				 *
-				 * Q omega_Rd
-				 *
-				 * omega_dot_d =
-				 *
-				 * Q alpha_Rd
-				 *
-				 * - omega x omega_d
+				 * The QPD law does not require omega_dot_d.
 				 */
 
 				const Dcmf R{
@@ -736,11 +697,6 @@ MulticopterRateControl::Run()
 				const Vector3f omega_d =
 					Q
 					* _omega_Rd;
-
-				const Vector3f omega_dot_d =
-					Q
-					* _alpha_Rd
-					- (rates % omega_d);
 
 				/*
 				 * ---------------------------------------------
@@ -762,8 +718,7 @@ MulticopterRateControl::Run()
 				if (!q_e.isAllFinite()
 				    || !PX4_ISFINITE(q_e_norm)
 				    || q_e_norm < 1e-5f
-				    || !omega_d.isAllFinite()
-				    || !omega_dot_d.isAllFinite()) {
+				    || !omega_d.isAllFinite()) {
 
 					use_smc = false;
 
@@ -790,128 +745,39 @@ MulticopterRateControl::Run()
 						: -1.f;
 
 					/*
-					 * Quaternion error vector:
-					 *
-					 * e_q =
-					 *
-					 * 2 sigma q_e_vec
-					 */
-					const Vector3f e_q =
-						2.f
-						* sigma
-						* q_e_vec;
-
-					/*
 					 * Angular velocity error:
 					 *
-					 * omega_e =
-					 *
-					 * omega - omega_d
+					 * omega_e = omega - omega_d
 					 */
 					const Vector3f omega_e =
 						rates
 						- omega_d;
 
 					/*
-					 * Analytical quaternion-error derivative.
-					 *
-					 * No numerical differentiation.
-					 * No LPF.
-					 *
-					 * e_q_dot =
-					 *
-					 * sigma [
-					 *     q_we omega_e
-					 *     + q_e_vec x omega_e
-					 * ]
-					 */
-					const Vector3f e_q_dot =
-						sigma
-						* (
-							q_we
-							* omega_e
-							+
-							(q_e_vec
-							 % omega_e)
-						  );
-
-					/*
-					 * Sliding surface:
-					 *
-					 * s =
-					 *
-					 * omega_e
-					 *
-					 * + Lambda e_q
-					 */
-					const Vector3f s =
-						omega_e
-						+
-						_smc_lambda.emult(
-							e_q
-						);
-
-					const Vector3f sat_s =
-						smcSaturation(
-							s
-						);
-
-					/*
 					 * -----------------------------------------
-					 * Rigid-body dynamics
-					 * -----------------------------------------
-					 *
-					 * J is represented by its diagonal
-					 * elements for the current F450 model.
-					 */
-
-					const Vector3f J_omega =
-						_smc_inertia.emult(
-							rates
-						);
-
-					const Vector3f
-					omega_cross_J_omega =
-						rates
-						% J_omega;
-
-					/*
-					 * -----------------------------------------
-					 * Quaternion SMC torque law
+					 * Quaternion PD torque law
 					 * -----------------------------------------
 					 *
 					 * tau =
 					 *
-					 * J(
-					 *    omega_dot_d
-					 *    - Lambda e_q_dot
-					 *  )
+					 * - Kd omega_e
 					 *
-					 * + omega x J omega
+					 * - Kp sigma q_e_vec
 					 *
-					 * - K s
-					 *
-					 * - eta sat(s)
+					 * sigma selects the shortest quaternion
+					 * representation and avoids unwinding.
 					 */
+					const Vector3f q_error_shortest =
+						sigma
+						* q_e_vec;
 
 					const Vector3f tau_phys =
-						_smc_inertia.emult(
-
-							omega_dot_d
-							-
-							_smc_lambda.emult(
-								e_q_dot
-							)
+						- _qpd_kd.emult(
+							omega_e
 						)
 
-						+ omega_cross_J_omega
-
-						- _smc_k.emult(
-							s
-						)
-
-						- _smc_eta.emult(
-							sat_s
+						- _qpd_kp.emult(
+							q_error_shortest
 						);
 
 					/*
@@ -1005,14 +871,14 @@ MulticopterRateControl::Run()
 
 				/*
 				 * No PID integrator should remain stored while
-				 * QSMC owns the torque loop. This prevents an
+				 * QPD owns the torque loop. This prevents an
 				 * integral kick if fallback is later required.
 				 */
 				_rate_control.resetIntegral();
 
 				/*
-				 * QSMC does NOT filter omega_d, alpha_d or its
-				 * calculated torque. Keep the stock yaw LPF
+				 * QPD does NOT filter omega_d or its calculated
+				 * torque. Keep the stock yaw LPF
 				 * state aligned with the present yaw torque so
 				 * that a later transition back to PID is smooth.
 				 */
@@ -1027,7 +893,7 @@ MulticopterRateControl::Run()
 			 * =================================================
 			 *
 			 * The PX4 rate_ctrl_status message represents the
-			 * stock PID internals. While QSMC is active, publish
+			 * stock PID internals. While QPD is active, publish
 			 * a zero-initialized status rather than stale PID
 			 * state.
 			 */
@@ -1136,12 +1002,12 @@ MulticopterRateControl::Run()
 
 			/*
 			 * =================================================
-			 * Re-apply QSMC bring-up torque safety clamp
+			 * Re-apply QPD bring-up torque safety clamp
 			 * =================================================
 			 *
 			 * Battery scaling can increase normalized torque.
 			 * For the first F450 tests, make sure that scaling
-			 * cannot bypass the QSMC bring-up limit.
+			 * cannot bypass the QPD bring-up limit.
 			 */
 
 			if (use_smc) {
@@ -1326,11 +1192,12 @@ MulticopterRateControl::print_usage(
 		R"DESCR_STR(
 ### Description
 This implements the multicopter rate controller. It retains the stock PX4 rate
-PID as a fallback and uses the analytical Quaternion Sliding Mode Controller
+PID as a fallback and uses the analytical Quaternion PD Controller
 when a fresh and valid SMC attitude reference is available.
 
-The Quaternion SMC receives q_d, omega_Rd and alpha_Rd from mc_att_control and
-publishes torque through the standard PX4 vehicle_torque_setpoint interface.
+The Quaternion PD controller receives q_d and omega_Rd from mc_att_control via
+the existing SMC attitude-reference transport and publishes torque through the
+standard PX4 vehicle_torque_setpoint interface.
 
 )DESCR_STR");
 
