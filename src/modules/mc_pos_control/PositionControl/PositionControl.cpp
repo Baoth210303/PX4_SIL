@@ -205,13 +205,16 @@ void PositionControl::_velocityControl(const float dt)
 
 void PositionControl::_updatePositionLESO(const float dt)
 {
-	// Do not adapt during ground contact, takeoff ramp, or invalid state.
-	const bool ready = _eso_pos_enabled && _vel.isAllFinite()
+	// The third-order observer requires valid position AND velocity estimates.
+	// Flight-state gating must be provided by the caller, if required.
+	const bool ready = _eso_pos_enabled && _pos.isAllFinite() && _vel.isAllFinite()
 		&& PX4_ISFINITE(dt) && dt > 0.001f && dt < 0.08f
 		&& PX4_ISFINITE(_hover_thrust) && _hover_thrust > 0.05f;
 
 	if (!ready) {
 		_eso_pos_initialized = false;
+		_eso_pos_hat.zero();
+		_eso_vel_hat.zero();
 		_eso_dacc_hat.zero();
 		_eso_dacc_limited.zero();
 		_eso_comp_1.zero();
@@ -220,6 +223,7 @@ void PositionControl::_updatePositionLESO(const float dt)
 	}
 
 	if (!_eso_pos_initialized) {
+		_eso_pos_hat = _pos;
 		_eso_vel_hat = _vel;
 		_eso_dacc_hat.zero();
 		_eso_dacc_limited.zero();
@@ -236,16 +240,25 @@ void PositionControl::_updatePositionLESO(const float dt)
 	const Vector3f gravity_ned(0.f, 0.f, CONSTANTS_ONE_G);
 	const Vector3f acc_nominal = gravity_ned
 		+ _eso_prev_thrust * (CONSTANTS_ONE_G / _hover_thrust);
-	const Vector3f error = _vel - _eso_vel_hat;
+	// Third-order model-based LESO, per NED axis:
+	//   p_hat_dot    = v_hat + 3 * wo * (p - p_hat)
+	//   v_hat_dot    = acc_nominal + d_hat + 3 * wo^2 * (p - p_hat)
+	//   d_hat_dot    = wo^3 * (p - p_hat)
+	// Its nominal characteristic polynomial is (s + wo)^3.
+	const Vector3f position_error = _pos - _eso_pos_hat;
 	const float wo = ESO_POS_BANDWIDTH;
-	const Vector3f vel_hat_dot = acc_nominal + _eso_dacc_hat + 2.f * wo * error;
-	const Vector3f dacc_hat_dot = (wo * wo) * error;
+	const float wo2 = wo * wo;
+	const Vector3f pos_hat_dot = _eso_vel_hat + 3.f * wo * position_error;
+	const Vector3f vel_hat_dot = acc_nominal + _eso_dacc_hat + 3.f * wo2 * position_error;
+	const Vector3f dacc_hat_dot = (wo2 * wo) * position_error;
 
+	_eso_pos_hat += dt * pos_hat_dot;
 	_eso_vel_hat += dt * vel_hat_dot;
 	_eso_dacc_hat += dt * dacc_hat_dot;
 
-	if (!_eso_vel_hat.isAllFinite() || !_eso_dacc_hat.isAllFinite()) {
+	if (!_eso_pos_hat.isAllFinite() || !_eso_vel_hat.isAllFinite() || !_eso_dacc_hat.isAllFinite()) {
 		_eso_pos_initialized = false;
+		_eso_pos_hat = _pos;
 		_eso_vel_hat = _vel;
 		_eso_dacc_hat.zero();
 		_eso_dacc_limited.zero();

@@ -45,6 +45,10 @@ using namespace px4::logger;
 
 void LoggedTopics::add_default_topics()
 {
+	// F450 QSMC-LESO diagnostics: log all published debug_array samples.
+	// id=1: eso_att (omega_hat, d_hat, tau_comp).
+	// id=2: eso_pos (v_hat, dacc_hat, filtered acceleration source).
+	add_topic("debug_array", 0);
 	add_topic("action_request");
 	add_topic("actuator_armed");
 	add_optional_topic("actuator_controls_status_0", 300);
@@ -130,7 +134,7 @@ void LoggedTopics::add_default_topics()
 	add_optional_topic("takeoff_status", 1000);
 	add_optional_topic("tecs_status", 200);
 	add_optional_topic("tiltrotor_extra_controls", 100);
-	add_topic("trajectory_setpoint", 200);
+	add_topic("trajectory_setpoint", 20);
 	add_topic("transponder_report");
 	add_topic("vehicle_acceleration", 50);
 	add_topic("vehicle_air_data", 200);
@@ -147,7 +151,7 @@ void LoggedTopics::add_default_topics()
 	add_topic("vehicle_local_position", 100);
 	add_topic("vehicle_local_position_setpoint", 100);
 	add_topic("vehicle_magnetometer", 200);
-	add_topic("vehicle_rates_setpoint", 20);
+	add_topic("vehicle_rates_setpoint", 10);
 	add_topic("vehicle_roi", 1000);
 	add_topic("vehicle_status");
 	add_topic("vtx");
@@ -164,7 +168,7 @@ void LoggedTopics::add_default_topics()
 	// multi topics
 	add_optional_topic_multi("actuator_outputs", 100, 3);
 	add_optional_topic_multi("airspeed_wind", 1000, 4);
-	add_optional_topic_multi("control_allocator_status", 200, 2);
+	add_optional_topic_multi("control_allocator_status", 20, 2);
 	add_optional_topic_multi("rate_ctrl_status", 200, 2);
 	add_optional_topic_multi("sensor_hygrometer", 500, 4);
 	add_optional_topic_multi("sensor_temp", 100, 4);
@@ -214,10 +218,10 @@ void LoggedTopics::add_default_topics()
 	add_optional_topic("pps_capture");
 
 	// additional control allocation logging
-	add_topic("actuator_motors", 100);
+	add_topic("actuator_motors", 20);
 	add_topic("actuator_servos", 100);
-	add_topic_multi("vehicle_thrust_setpoint", 20, 2);
-	add_topic_multi("vehicle_torque_setpoint", 20, 2);
+	add_topic_multi("vehicle_thrust_setpoint", 10, 2);
+	add_topic_multi("vehicle_torque_setpoint", 10, 2);
 
 	// SYS_HITL: default ground truth logging for simulation
 	int32_t sys_hitl = 0;

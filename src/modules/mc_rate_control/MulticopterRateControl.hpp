@@ -232,8 +232,8 @@ private:
 	uORB::Publication<vehicle_torque_setpoint_s>
 	_vehicle_torque_setpoint_pub;
 
-	// [0:2] omega_hat; [3:5] angular acceleration disturbance;
-	// [6:8] additive torque compensation [N*m].
+	// [0:2] omega_hat [rad/s]; [3:5] d_hat [rad/s^2];
+	// [6:8] actual additive compensation [N*m].
 	uORB::Publication<debug_array_s> _eso_att_debug_pub{ORB_ID(debug_array)};
 
 	/*
@@ -450,29 +450,26 @@ private:
 	};
 
 	/*
-	 * Linear Attitude ESO for the body-frame rigid-body model:
-	 *   omega_dot = J^-1(tau_cmd_prev - omega x J*omega) + d_omega
-	 *   omega_hat_dot = nominal + d_hat + 2*wo*(omega - omega_hat)
-	 *   d_hat_dot = wo^2*(omega - omega_hat)
+	 * Linear Attitude LESO (body FRD, scalar bandwidth per axis).
+	 * omega_dot = J^-1(tau_previous - omega x J*omega) + d_omega
+	 * omega_hat_dot = nominal + d_hat + 2*wo*(omega - omega_hat)
+	 * d_hat_dot = wo^2*(omega - omega_hat)
 	 *
-	 * Input tau_cmd_prev is inferred from FINAL normalized setpoint;
-	 * it is NOT measured achieved motor torque. Lumped d_omega thus
-	 * includes torque-model mismatch, actuator lag and disturbances.
-	 * The numbers below are conservative STARTING values, not paper gains.
+	 * d_hat is a TOTAL angular-acceleration disturbance [rad/s^2].
+	 * tau_previous is commanded torque, NOT measured actuator torque.
+	 *
+	 * Direct compensation: tau_comp = -J*(gamma .* d_hat).
+	 * No extra compensation LPF, disturbance clipping, torque clip,
+	 * fixed warm-up, or ramp. Existing PX4/QSMC output limits stay.
+	 * Note: no filter makes this more sensitive to gyro noise.
 	 */
 	static constexpr bool ESO_ATT_ENABLED = true;
 	matrix::Vector3f _eso_att_bandwidth{25.f, 25.f, 18.f}; // rad/s
-	matrix::Vector3f _eso_att_comp_gain{0.60f, 0.60f, 0.60f};
-	matrix::Vector3f _eso_att_comp_limit{0.020f, 0.020f, 0.012f}; // N*m
-	static constexpr float ESO_ATT_FILTER_BW = 8.f; // rad/s
-	static constexpr float ESO_ATT_WARMUP_S = 0.5f;
-	static constexpr float ESO_ATT_RAMP_S = 0.75f;
+	matrix::Vector3f _eso_att_comp_gain{0.0f, 0.0f, 0.0f};
 	bool _eso_att_initialized{false};
-	float _eso_att_elapsed{0.f};
-	matrix::Vector3f _eso_att_omega_hat{}; // rad/s, current body frame
-	matrix::Vector3f _eso_att_domega_hat{}; // rad/s^2, lumped acceleration
-	matrix::Vector3f _eso_att_domega_filtered{}; // rad/s^2
-	matrix::Vector3f _eso_att_prev_tau_phys{}; // previous command, N*m
+	matrix::Vector3f _eso_att_omega_hat{}; // rad/s, body FRD
+	matrix::Vector3f _eso_att_domega_hat{}; // rad/s^2, total angular acceleration disturbance
+	matrix::Vector3f _eso_att_prev_tau_phys{}; // prior commanded torque, N*m
 	hrt_abstime _eso_att_last_debug{0};
 
 	/*

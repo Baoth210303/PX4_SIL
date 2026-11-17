@@ -204,10 +204,8 @@ void
 MulticopterRateControl::resetAttitudeLESO(const Vector3f &omega)
 {
 	_eso_att_initialized = false;
-	_eso_att_elapsed = 0.f;
 	_eso_att_omega_hat = omega.isAllFinite() ? omega : Vector3f{};
 	_eso_att_domega_hat.zero();
-	_eso_att_domega_filtered.zero();
 	_eso_att_prev_tau_phys.zero();
 	_eso_att_last_debug = 0;
 }
@@ -250,37 +248,24 @@ MulticopterRateControl::updateAttitudeLESO(const Vector3f &omega, float dt)
 		return;
 	}
 
-	// Limit the signal used for compensation, without clipping the
-	// observer's internal state. Filtering reduces gyro-noise injection.
-	Vector3f limited = _eso_att_domega_hat;
-	for (int i = 0; i < 3; ++i) {
-		const float Ji = math::max(_smc_inertia(i), 1e-6f);
-		const float dmax = 2.f * _eso_att_comp_limit(i) / Ji;
-		limited(i) = math::constrain(limited(i), -dmax, dmax);
-	}
-
-	const float a = math::constrain(dt * ESO_ATT_FILTER_BW, 0.f, 1.f);
-	_eso_att_domega_filtered += a * (limited - _eso_att_domega_filtered);
-	_eso_att_elapsed += dt;
+	// Raw LESO disturbance estimate goes straight to compensation.
+	// No additional LPF, disturbance clip or compensator ramp.
 }
 
 
 Vector3f
 MulticopterRateControl::attitudeLESOCompensation() const
 {
-	if (!_eso_att_initialized) {
+	if (!_eso_att_initialized || !_eso_att_domega_hat.isAllFinite()) {
 		return Vector3f{};
 	}
 
-	const float ramp = math::constrain(
-		(_eso_att_elapsed - ESO_ATT_WARMUP_S) / ESO_ATT_RAMP_S,
-		0.f, 1.f);
-	Vector3f tau_comp = -ramp * _smc_inertia.emult(
-		_eso_att_comp_gain.emult(_eso_att_domega_filtered));
-	for (int i = 0; i < 3; ++i) {
-		tau_comp(i) = math::constrain(tau_comp(i),
-			-_eso_att_comp_limit(i), _eso_att_comp_limit(i));
-	}
+	// Body-frame disturbance is an angular acceleration [rad/s^2].
+	// Convert to disturbance torque [N*m], then compensate at gain gamma.
+	// This compensation has NO independent torque clamp; PX4's final
+	// normalized output clamp remains unchanged.
+	const Vector3f tau_comp = -_smc_inertia.emult(
+		_eso_att_comp_gain.emult(_eso_att_domega_hat));
 	return tau_comp.isAllFinite() ? tau_comp : Vector3f{};
 }
 

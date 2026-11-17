@@ -157,13 +157,14 @@ public:
 	 */
 	bool update(const float dt);
 
-	// Translational velocity-based LESO (NED). Keep QSMC unchanged.
+	// Third-order translational LESO (position/velocity/acceleration disturbance, NED).
 	void setPositionLESOActive(bool active)
 	{
 		_eso_pos_enabled = active;
 		if (!active) { _eso_pos_initialized = false; }
 	}
 	bool positionLESOInitialized() const { return _eso_pos_initialized; }
+	const matrix::Vector3f &positionLESOPositionHat() const { return _eso_pos_hat; }
 	const matrix::Vector3f &positionLESOVelocityHat() const { return _eso_vel_hat; }
 	const matrix::Vector3f &positionLESODisturbance() const { return _eso_dacc_hat; }
 	const matrix::Vector3f &positionLESOCompensation() const { return _eso_comp_1; }
@@ -229,7 +230,7 @@ private:
 	void _positionControl(); ///< Position proportional control
 	void _velocityControl(const float dt); ///< Velocity PID control
 	void _smcPositionVelocityControl(const float dt); ///< Full SMC translational control
-	void _updatePositionLESO(const float dt); ///< Trans. velocity/disturbance observer
+	void _updatePositionLESO(const float dt); ///< Third-order position/velocity/disturbance LESO
 	void _accelerationControl(); ///< Acceleration setpoint processing
 
 	// Gains
@@ -261,11 +262,13 @@ private:
 	bool _smc_jerk_des_history_initialized{false};
 	bool _smc_acc_meas_history_initialized{false};
 
-	// Translational LESO: v_dot = g*e3 + (g/hover)*thrust_NED + d_acc.
+	// Third-order translational LESO:
+	//   p_dot = v, v_dot = g*e3 + (g/hover)*thrust_NED + d_acc.
 	// The thrust_NED input is last cycle's commanded NED thrust vector,
 	// not achieved thrust: d_acc is a TOTAL acceleration disturbance.
 	bool _eso_pos_enabled{false};
 	bool _eso_pos_initialized{false};
+	matrix::Vector3f _eso_pos_hat{};       // m, NED
 	matrix::Vector3f _eso_vel_hat{};       // m/s, NED
 	matrix::Vector3f _eso_dacc_hat{};      // m/s^2, NED
 	matrix::Vector3f _eso_dacc_limited{};  // clipped estimate used for compensation
