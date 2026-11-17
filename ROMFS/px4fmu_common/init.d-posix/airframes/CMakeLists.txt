@@ -72,6 +72,7 @@ px4_add_romfs_files(
 
 	4001_gz_x500
 	4090_gz_f450
+	4091_gz_f450_payload
 	4002_gz_x500_depth
 	4003_gz_rc_cessna
 	4004_gz_standard_vtol
