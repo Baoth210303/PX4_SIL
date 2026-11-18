@@ -465,7 +465,7 @@ private:
 	 */
 	static constexpr bool ESO_ATT_ENABLED = true;
 	matrix::Vector3f _eso_att_bandwidth{25.f, 25.f, 18.f}; // rad/s
-	matrix::Vector3f _eso_att_comp_gain{0.0f, 0.0f, 0.0f};
+	matrix::Vector3f _eso_att_comp_gain{0.2f, 0.2f, 0.2f};
 	bool _eso_att_initialized{false};
 	matrix::Vector3f _eso_att_omega_hat{}; // rad/s, body FRD
 	matrix::Vector3f _eso_att_domega_hat{}; // rad/s^2, total angular acceleration disturbance
